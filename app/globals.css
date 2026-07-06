@@ -1,0 +1,312 @@
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------------------------------------------------------------------------
+   Theme design tokens. Values are space-separated RGB channels so Tailwind can
+   apply alpha via `rgb(var(--token) / <alpha-value>)`.
+   `:root` holds the light palette (ETF쇼핑-style: near-white page, white cards,
+   soft gray borders, teal/blue accent). `.dark` keeps the current Gorani dark.
+   ThemeProvider toggles the `dark`/`light` class on <html> before paint.
+--------------------------------------------------------------------------- */
+:root {
+  --background: 248 250 252; /* #f8fafc near-white page */
+  --foreground: 30 41 59; /* slate-800 text */
+  --card: 255 255 255; /* white cards */
+  --card-foreground: 15 23 42; /* slate-900 */
+  --border: 229 231 235; /* #e5e7eb soft gray */
+  --muted: 241 245 249; /* slate-100 surfaces */
+  --muted-foreground: 100 116 139; /* slate-500 */
+  --accent: 13 148 136; /* teal-600 */
+  --accent-foreground: 255 255 255;
+  --success: 22 163 74; /* green-600 */
+  --danger: 225 29 72; /* rose-600 */
+  --warning: 217 119 6; /* amber-600 */
+  color-scheme: light;
+}
+
+.dark {
+  --background: 17 21 22; /* #111516 current dark page */
+  --foreground: 226 232 240; /* slate-200 */
+  --card: 25 31 32; /* #191f20 current dark card */
+  --card-foreground: 241 245 249; /* slate-100 */
+  --border: 42 51 54; /* #2a3336 */
+  --muted: 23 28 29; /* #171c1d */
+  --muted-foreground: 148 163 184; /* slate-400 */
+  --accent: 45 212 191; /* teal-400 */
+  --accent-foreground: 8 16 16;
+  --success: 34 197 94; /* green-500 */
+  --danger: 229 72 77; /* current up red */
+  --warning: 251 191 36; /* amber-400 */
+  color-scheme: dark;
+}
+
+body {
+  background-color: rgb(var(--background));
+  color: rgb(var(--foreground));
+}
+
+html,
+body {
+  font-family:
+    "Pretendard",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* 한글이 음절 단위로 끊겨 "한 글자씩 줄바꿈" 되는 현상 방지.
+     keep-all은 CJK만 영향, 라틴/숫자는 normal과 동일하게 동작한다. */
+  word-break: keep-all;
+}
+
+/* 숫자 고정폭 (표 정렬용). 금액/숫자는 항상 한 줄에 유지해
+   원화 기호(₩)·부호·단위가 숫자와 줄바꿈으로 분리되지 않게 한다 (#5). */
+.num {
+  font-feature-settings: "tnum" 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 스크롤바 숨김 */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* 다크 스크롤바 */
+.scroll-dark::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-dark::-webkit-scrollbar-thumb {
+  background: #2f3a3d;
+  border-radius: 4px;
+}
+.scroll-dark::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-dark {
+  scrollbar-width: thin;
+  scrollbar-color: #2f3a3d transparent;
+}
+
+/* 라이트 스크롤바 */
+.scroll-light::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-light::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+.scroll-light::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll-light {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+
+/* ASSET-PORTFOLIO-UX-POLISH-1 #5: 라이트모드 검은 스크롤바 복구.
+   많은 표/카드 컴포넌트(HoldingsTable, AssetTable, SnapshotHistory, 배당/캘린더
+   테이블 등)가 테마와 무관하게 `scroll-dark` 를 하드코딩하고 있어, 라이트모드에서
+   흰 카드 위에 어두운(#2f3a3d) 스크롤바가 "검은 스크롤바"로 보였다.
+   라이트 클래스가 적용된 동안에는 `scroll-dark` 도 밝은 중립색으로 분기한다.
+   다크모드(`.dark`)에서는 기존 어두운 스크롤바가 그대로 유지된다. */
+.light .scroll-dark::-webkit-scrollbar-thumb {
+  background: #cbd5e1; /* slate-300 */
+}
+.light .scroll-dark::-webkit-scrollbar-track {
+  background: #f8fafc; /* slate-50 */
+}
+.light .scroll-dark {
+  scrollbar-color: #cbd5e1 #f8fafc;
+}
+
+/* recharts focus 테두리 제거 */
+.recharts-wrapper:focus,
+.recharts-surface:focus {
+  outline: none;
+}
+
+/* ===========================================================================
+   THEME-2 light-mode surface hotfix.
+
+   Many feature components still hardcode dark surfaces with *bare* arbitrary
+   utilities (e.g. `bg-[#191f20]`, `border-[#2a3336]`) instead of light/dark
+   pairs, so they stayed black in light mode. Converting all 60+ files by hand
+   is error-prone, so light mode remaps ONLY those bare dark utilities here.
+
+   Why this is safe (not the "dangerous global remap" we were warned against):
+   - It is scoped to `.light` only — dark mode is never touched.
+   - It targets the exact dark hex classes used as surfaces/borders. Already
+     converted components use the `dark:`-prefixed class (a different class
+     name), so they are never matched.
+   - Buttons / active nav keep their solid accent colors: those use
+     `bg-blue-600`, `bg-white/10`, etc. — none of which appear below. White
+     button text is explicitly re-asserted on solid accent backgrounds.
+--------------------------------------------------------------------------- */
+
+/* --- Dark card surfaces -> white -------------------------------------- */
+.light .bg-\[\#191f20\],
+.light .bg-\[\#1e2324\],
+.light .bg-\[\#202627\],
+.light .bg-\[\#181c1d\],
+.light .bg-\[\#1b2021\],
+.light .bg-\[\#1b2030\],
+.light .bg-\[\#171c1d\],
+.light .bg-\[\#161a25\],
+.light .bg-\[\#0f1729\],
+.light .bg-\[\#101719\] {
+  background-color: rgb(var(--card));
+}
+
+/* --- Deeper / nested / input surfaces -> near-white muted ------------- */
+.light .bg-\[\#111516\],
+.light .bg-\[\#11181a\],
+.light .bg-\[\#121819\],
+.light .bg-\[\#12151e\],
+.light .bg-\[\#0c1011\],
+.light .bg-\[\#0e111a\],
+.light .bg-\[\#0c0e16\],
+.light .bg-\[\#151a1b\],
+.light .bg-\[\#151b1d\],
+.light .bg-\[\#141a1b\],
+.light .bg-\[\#0f1415\],
+.light .bg-\[\#171d1e\],
+.light .bg-\[\#06070b\],
+.light .bg-\[\#1d2527\],
+.light .bg-\[\#1e2628\],
+.light .bg-\[\#252b2c\],
+.light .bg-\[\#262d2f\],
+.light .bg-\[\#2f383a\] {
+  background-color: rgb(var(--muted));
+}
+
+/* --- Dark dividers used as `bg-[#2a3336]` -> light divider ------------ */
+.light .bg-\[\#2a3336\] {
+  background-color: rgb(var(--border));
+}
+
+/* --- Dark borders -> soft gray border -------------------------------- */
+.light .border-\[\#2a3336\],
+.light .border-\[\#1c2426\],
+.light .border-\[\#222a2c\],
+.light .border-\[\#263234\],
+.light .border-\[\#263033\],
+.light .border-\[\#263134\],
+.light .border-\[\#273032\],
+.light .border-\[\#273035\],
+.light .border-\[\#273235\],
+.light .border-\[\#303a3d\],
+.light .border-\[\#303b3f\],
+.light .border-\[\#344044\],
+.light .border-\[\#334044\],
+.light .border-\[\#232d30\],
+.light .border-\[\#20282a\],
+.light .border-\[\#22303a\],
+.light .border-\[\#242938\],
+.light .border-\[\#2a3142\],
+.light .border-\[\#222838\],
+.light .border-\[\#191e2b\],
+.light .border-\[\#1f2433\],
+.light .border-\[\#1e293b\],
+.light .border-\[\#1c2426\] {
+  border-color: rgb(var(--border));
+}
+
+/* --- Light-on-dark text -> readable dark slate ----------------------- */
+.light .text-white {
+  color: rgb(15 23 42); /* slate-900 */
+}
+/* ...but keep button / tab / badge text white on solid accent fills. */
+.light [class*="bg-blue-"].text-white,
+.light [class*="bg-indigo-"].text-white,
+.light [class*="bg-sky-"].text-white,
+.light [class*="bg-emerald-"].text-white,
+.light [class*="bg-green-"].text-white,
+.light [class*="bg-teal-"].text-white,
+.light [class*="bg-rose-"].text-white,
+.light [class*="bg-red-"].text-white,
+.light [class*="bg-amber-"].text-white,
+.light [class*="bg-orange-"].text-white,
+.light [class*="bg-violet-"].text-white,
+.light [class*="bg-purple-"].text-white {
+  color: #fff;
+}
+.light .hover\:text-white:hover {
+  color: rgb(15 23 42);
+}
+
+.light .text-slate-100,
+.light .text-slate-200 {
+  color: rgb(30 41 59); /* slate-800 */
+}
+.light .text-slate-300 {
+  color: rgb(51 65 85); /* slate-700 */
+}
+
+/* Tint texts sitting on `/10` colored banners need more contrast on white. */
+.light .text-emerald-200 {
+  color: rgb(4 120 87);
+}
+.light .text-amber-200 {
+  color: rgb(180 83 9);
+}
+.light .text-blue-200 {
+  color: rgb(29 78 216);
+}
+.light .text-red-300,
+.light .text-red-200 {
+  color: rgb(220 38 38);
+}
+.light .text-emerald-100 {
+  color: rgb(4 120 87);
+}
+.light .text-blue-100 {
+  color: rgb(29 78 216);
+}
+.light .text-amber-100 {
+  color: rgb(180 83 9);
+}
+.light .text-purple-200,
+.light .text-purple-100 {
+  color: rgb(126 34 206); /* purple-700 — keep the earnings (실적) tag legible on white */
+}
+
+/* --- Recharts: light grid / axis / tooltip --------------------------- */
+/* CSS stroke/fill override the dark values recharts sets as SVG attributes. */
+.light .recharts-cartesian-grid line {
+  stroke: rgb(var(--border));
+}
+.light .recharts-cartesian-axis-line,
+.light .recharts-cartesian-axis-tick-line {
+  stroke: #cbd5e1;
+}
+.light .recharts-cartesian-axis-tick-value tspan {
+  fill: #64748b;
+}
+.light .recharts-tooltip-cursor {
+  fill: rgba(15, 23, 42, 0.05) !important;
+}
+.light .recharts-default-tooltip {
+  background: #ffffff !important;
+  border-color: rgb(var(--border)) !important;
+  color: #0f172a !important;
+}
+.light .recharts-tooltip-label,
+.light .recharts-tooltip-item {
+  color: #475569 !important;
+}
+.light .recharts-legend-item-text {
+  color: #475569 !important;
+}

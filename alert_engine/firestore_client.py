@@ -1,0 +1,299 @@
+"""Firestore access layer (firebase-admin).
+
+This is the ONLY module that talks to Firestore. firebase-admin is imported
+lazily so the package can be imported (and unit-tested / py_compiled) without
+the dependency installed or credentials configured.
+
+Path boundary: every read/write is scoped under ``users/{uid}/...``. The
+existing calendar collections are READ-ONLY; the engine only WRITES to the new
+alert collections (notificationLogs, alertRules state, calendarAlertMarks).
+
+Collections (mirroring ``lib/alerts/collections.ts`` + calendar repos):
+- users/{uid}/alertRules/{id}
+- users/{uid}/notificationLogs/{id}
+- users/{uid}/alertSettings/default
+- users/{uid}/calendarEvents/{id}        (READ-ONLY, meta incl. star/heart)
+- users/{uid}/calendarCustomEvents/{id}  (READ-ONLY)
+- users/{uid}/calendarAlertMarks/{id}    (🔔 bell, Goralert-owned)
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+from .config import load_config, load_service_account_dict
+from .models import AlertRule, AlertSettings, NotificationLog
+
+logger = logging.getLogger("alert_engine.firestore")
+
+ALERT_RULES = "alertRules"
+NOTIFICATION_LOGS = "notificationLogs"
+ALERT_SETTINGS = "alertSettings"
+ALERT_SETTINGS_DOC_ID = "default"
+CALENDAR_EVENTS = "calendarEvents"
+CALENDAR_CUSTOM_EVENTS = "calendarCustomEvents"
+CALENDAR_ALERT_MARKS = "calendarAlertMarks"
+
+_db = None  # cached Firestore client
+
+
+def _init_firebase():
+    """Initialize the firebase-admin app exactly once, from config.
+
+    Credential resolution order:
+      1. inline service-account JSON (FIREBASE_SERVICE_ACCOUNT[_KEY])
+      2. GOOGLE_APPLICATION_CREDENTIALS path (application-default)
+    Raises RuntimeError with a clear message when neither is available.
+    """
+    import firebase_admin  # lazy import
+    from firebase_admin import credentials
+
+    if firebase_admin._apps:
+        return firebase_admin.get_app()
+
+    sa_dict = load_service_account_dict()
+    if sa_dict is not None:
+        cred = credentials.Certificate(sa_dict)
+        return firebase_admin.initialize_app(cred)
+
+    cfg = load_config()
+    if cfg.google_application_credentials:
+        # firebase-admin picks up GOOGLE_APPLICATION_CREDENTIALS automatically
+        # via ApplicationDefault.
+        cred = credentials.ApplicationDefault()
+        return firebase_admin.initialize_app(cred)
+
+    raise RuntimeError(
+        "No Firebase credentials configured. Set FIREBASE_SERVICE_ACCOUNT "
+        "(service-account JSON) or GOOGLE_APPLICATION_CREDENTIALS (path)."
+    )
+
+
+def get_db():
+    """Return a cached Firestore client, initializing firebase-admin on demand."""
+    global _db
+    if _db is not None:
+        return _db
+    from firebase_admin import firestore  # lazy import
+
+    _init_firebase()
+    _db = firestore.client()
+    return _db
+
+
+def reset_client() -> None:
+    """Drop the cached client (used by tests)."""
+    global _db
+    _db = None
+
+
+# --- AlertRule reads ---------------------------------------------------------
+
+
+def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
+    """List enabled rules.
+
+    - When ``uid`` is given: query ``users/{uid}/alertRules`` where enabled==True.
+    - Otherwise: use a collection_group query across all users' ``alertRules``.
+
+    The collection_group path requires a Firestore index on (enabled) for the
+    ``alertRules`` group — see the deploy doc.
+    """
+    db = get_db()
+    rules: List[AlertRule] = []
+
+    if uid:
+        col = db.collection("users").document(uid).collection(ALERT_RULES)
+        query = col.where("enabled", "==", True)
+        for snap in query.stream():
+            rule = AlertRule.from_dict({"id": snap.id, **(snap.to_dict() or {})})
+            if not rule.uid:
+                rule.uid = uid
+            rules.append(rule)
+        return rules
+
+    # All users via collection_group.
+    group = db.collection_group(ALERT_RULES).where("enabled", "==", True)
+    for snap in group.stream():
+        data = snap.to_dict() or {}
+        rule = AlertRule.from_dict({"id": snap.id, **data})
+        if not rule.uid:
+            rule.uid = _extract_uid_from_path(snap)
+        if rule.uid:
+            rules.append(rule)
+    return rules
+
+
+def _extract_uid_from_path(snap) -> str:
+    """Best-effort uid extraction from a collection_group doc reference path.
+
+    Path shape: users/{uid}/alertRules/{id}.
+    """
+    try:
+        parts = snap.reference.path.split("/")
+        if len(parts) >= 2 and parts[0] == "users":
+            return parts[1]
+    except Exception:
+        pass
+    return ""
+
+
+def get_rule(uid: str, rule_id: str) -> Optional[AlertRule]:
+    db = get_db()
+    snap = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id).get()
+    if not snap.exists:
+        return None
+    return AlertRule.from_dict({"id": snap.id, **(snap.to_dict() or {})})
+
+
+# --- AlertSettings -----------------------------------------------------------
+
+
+def load_alert_settings(uid: str) -> AlertSettings:
+    """Load per-user settings, defaulting to globalEnabled=True when absent."""
+    db = get_db()
+    snap = (
+        db.collection("users").document(uid)
+        .collection(ALERT_SETTINGS).document(ALERT_SETTINGS_DOC_ID).get()
+    )
+    if not snap.exists:
+        return AlertSettings()
+    return AlertSettings.from_dict(snap.to_dict() or {})
+
+
+# --- Calendar (READ-ONLY) ----------------------------------------------------
+
+
+def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
+    """Read users/{uid}/calendarEvents (meta incl. star/heart/ticker/type)."""
+    db = get_db()
+    out: List[Dict[str, Any]] = []
+    for snap in db.collection("users").document(uid).collection(CALENDAR_EVENTS).stream():
+        out.append({"id": snap.id, **(snap.to_dict() or {})})
+    return out
+
+
+def read_calendar_custom_events(uid: str) -> List[Dict[str, Any]]:
+    """Read users/{uid}/calendarCustomEvents (id,title,date,type,ticker?)."""
+    db = get_db()
+    out: List[Dict[str, Any]] = []
+    for snap in db.collection("users").document(uid).collection(CALENDAR_CUSTOM_EVENTS).stream():
+        out.append({"id": snap.id, **(snap.to_dict() or {})})
+    return out
+
+
+def read_calendar_alert_marks(uid: str) -> List[Dict[str, Any]]:
+    """Read users/{uid}/calendarAlertMarks (🔔 bell marks, Goralert-owned)."""
+    db = get_db()
+    out: List[Dict[str, Any]] = []
+    for snap in db.collection("users").document(uid).collection(CALENDAR_ALERT_MARKS).stream():
+        out.append({"id": snap.id, **(snap.to_dict() or {})})
+    return out
+
+
+# --- NotificationLog writes + idempotency ------------------------------------
+
+
+def reserve_log(uid: str, event_id: str) -> bool:
+    """Atomically reserve a NotificationLog slot for ``event_id`` (reserve-before-send).
+
+    Uses Firestore ``DocumentReference.create()`` which FAILS if the document
+    already exists — a server-side atomic check-and-set. Returns:
+      - True  : we created (own) the reservation -> proceed to deliver + finalize
+      - False : it already existed -> another run won this bucket; short-circuit
+
+    This is the idempotency primitive that closes the check-then-act race a plain
+    ``log_exists`` read leaves open. The reservation is later overwritten with the
+    full record by ``write_notification_log`` (``set(..., merge=False)``).
+    """
+    from firebase_admin import firestore  # lazy import for SERVER_TIMESTAMP
+
+    db = get_db()
+    ref = (
+        db.collection("users").document(uid)
+        .collection(NOTIFICATION_LOGS).document(event_id)
+    )
+    try:
+        ref.create({
+            "eventId": event_id,
+            "reservedAt": firestore.SERVER_TIMESTAMP,
+            "pending": True,
+        })
+        return True
+    except Exception as exc:  # noqa: BLE001
+        # AlreadyExists (HTTP 409 / google.api_core.exceptions.AlreadyExists or
+        # google.cloud.exceptions.Conflict) => someone already reserved this
+        # bucket. Anything else: re-raise so the engine can fall back.
+        name = type(exc).__name__
+        if name in ("AlreadyExists", "Conflict") or "already exists" in str(exc).lower():
+            return False
+        raise
+
+
+def log_exists(uid: str, event_id: str) -> bool:
+    """True when a NotificationLog with this eventId already exists.
+
+    Idempotency check: we store logs keyed by id == eventId, so a direct doc
+    get is enough and avoids needing a composite index.
+    """
+    db = get_db()
+    snap = (
+        db.collection("users").document(uid)
+        .collection(NOTIFICATION_LOGS).document(event_id).get()
+    )
+    return bool(snap.exists)
+
+
+def write_notification_log(uid: str, log: NotificationLog) -> None:
+    """Write exactly one NotificationLog (永久 보존). Keyed by eventId.
+
+    Uses ``merge=False`` set so a re-run with the same eventId overwrites an
+    identical record rather than duplicating; combined with ``log_exists`` the
+    engine never re-sends. ``createdAt`` is stamped with the server timestamp.
+    """
+    from firebase_admin import firestore  # lazy import for SERVER_TIMESTAMP
+
+    db = get_db()
+    payload = log.to_dict()
+    payload["createdAt"] = firestore.SERVER_TIMESTAMP
+    (
+        db.collection("users").document(uid)
+        .collection(NOTIFICATION_LOGS).document(log.id)
+        .set(payload)
+    )
+
+
+# --- AlertRule state writes --------------------------------------------------
+
+
+def update_rule_state(
+    uid: str,
+    rule_id: str,
+    last_triggered_at: Optional[str] = None,
+    last_value: Optional[Any] = None,
+    enabled: Optional[bool] = None,
+    engine_version: Optional[str] = None,
+) -> None:
+    """Update only the engine-owned state fields on a rule (merge write).
+
+    We never rewrite the whole rule doc (the web app owns name/condition/etc.).
+    Only lastTriggeredAt / lastValue / enabled / engineVersion are touched.
+    """
+    from firebase_admin import firestore  # lazy import
+
+    db = get_db()
+    updates: Dict[str, Any] = {"updatedAt": firestore.SERVER_TIMESTAMP}
+    if last_triggered_at is not None:
+        updates["lastTriggeredAt"] = last_triggered_at
+    if last_value is not None:
+        updates["lastValue"] = last_value
+    if enabled is not None:
+        updates["enabled"] = enabled
+    if engine_version is not None:
+        updates["engineVersion"] = engine_version
+    (
+        db.collection("users").document(uid)
+        .collection(ALERT_RULES).document(rule_id)
+        .set(updates, merge=True)
+    )

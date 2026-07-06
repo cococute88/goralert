@@ -1,0 +1,16 @@
+# GORALERT Python Alert Engine (Sprint 2) — repo-root requirements.
+# Kept SEPARATE from original/requirements.txt (the Streamlit app).
+# Pinned to versions known to work together on Python 3.11 (GitHub Actions).
+
+firebase-admin==6.5.0      # Firestore + FCM (messaging) via one service account
+yfinance==0.2.40           # market data (price/rsi/vix/fx/gold/bitcoin/etf)
+pandas==2.2.2              # required by original.logic.market (reused RSI/MDD math)
+python-dateutil==2.9.0.post0
+requests==2.32.3           # Telegram Bot API sendMessage
+tzdata==2024.1            # IANA tz DB for zoneinfo — REQUIRED on Windows/minimal
+                          # images. Without it, get_tz() silently falls back to
+                          # UTC, misinterpreting KST rule times by ~9h.
+
+# --- test tooling (CI / local) ---
+pytest==8.2.2
+hypothesis==6.103.1

@@ -1,0 +1,34 @@
+name: Repo Keepalive
+
+# Prevents GitHub from auto-deactivating scheduled workflows after 60 days of
+# repository inactivity (mirrors the intent of
+# original/.github/workflows/wake-streamlit.yml). A lightweight no-op touch on a
+# ~6-day cadence keeps the scheduler — and therefore the alert-engine cron in
+# alert-engine.yml — alive. (REQ-029.4)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 6 days at 04:11 UTC (well under the 60-day deactivation threshold).
+    - cron: "11 4 */6 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-keepalive
+  cancel-in-progress: true
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: No-op heartbeat
+        run: |
+          echo "Keepalive heartbeat at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "Purpose: keep scheduled workflows active (60-day deactivation guard)."
+          echo "No repository changes are made by this job."

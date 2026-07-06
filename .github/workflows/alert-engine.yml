@@ -1,0 +1,67 @@
+name: Goralert Alert Engine
+
+# Mirrors the proven pattern in original/.github/workflows/update_economic_calendar.yml
+# (checkout -> setup-python 3.11 -> pip install -r requirements.txt -> run script),
+# but instead of committing data it reads/writes Firestore via the alert engine.
+#
+# GitHub Actions cron is UTC. KST = UTC + 9h.
+
+on:
+  workflow_dispatch:
+    inputs:
+      job-scope:
+        description: "Rule scope to process"
+        required: false
+        default: "all"
+        type: choice
+        options: ["all", "daily", "market", "calendar"]
+      dry-run:
+        description: "Evaluate + log only (no delivery/writes)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # market threshold checks — every 30 min during/around US+KR market hours.
+    - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+
+# Constant group (NOT keyed by job-scope) so that manual workflow_dispatch runs
+# and scheduled runs SERIALIZE instead of overlapping. Overlapping runs that
+# both evaluate the same rule in the same bucket could double-send before the
+# idempotency log is written. cancel-in-progress:false => the second run queues.
+concurrency:
+  group: goralert-alert-engine
+  cancel-in-progress: false
+
+jobs:
+  run-engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Real secrets — configure in repo Settings -> Secrets and variables -> Actions.
+      FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      DEFAULT_TZ: "Asia/Seoul"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run alert engine
+        run: |
+          python -m alert_engine.main \
+            --job-scope "${{ github.event.inputs.job-scope || 'all' }}" \
+            ${{ (github.event.inputs.dry-run == 'true') && '--dry-run' || '' }}
