@@ -30,7 +30,15 @@ export type EvaluatePreviewResult = {
 
 export interface AlertProvider {
   evaluatePreview(rule: AlertRule): Promise<EvaluatePreviewResult>;
-  sendTest(uid: string, rule: AlertRule, channels: DeliveryChannel[]): Promise<NotificationLog>;
+  // `channelResults`, when provided, records the ACTUAL per-channel outcome
+  // (e.g. a real device push that was verified to display). When omitted the
+  // channels default to `sent` for preview-only callers.
+  sendTest(
+    uid: string,
+    rule: AlertRule,
+    channels: DeliveryChannel[],
+    channelResults?: NotificationChannelResult[],
+  ): Promise<NotificationLog>;
 }
 
 // Variables available to message templates. Kept loose so callers can pass any
@@ -104,7 +112,12 @@ export class MockAlertProvider implements AlertProvider {
   // sendTest builds an AlertEvent, renders the message, and writes a test
   // NotificationLog (isTest:true, channels marked sent). It intentionally does
   // NOT touch rule.lastTriggeredAt / rule.enabled — a test is a no-op on rule state.
-  async sendTest(uid: string, rule: AlertRule, channels: DeliveryChannel[]): Promise<NotificationLog> {
+  async sendTest(
+    uid: string,
+    rule: AlertRule,
+    channels: DeliveryChannel[],
+    channelResults?: NotificationChannelResult[],
+  ): Promise<NotificationLog> {
     const now = new Date().toISOString();
     const eventId = `${rule.id}:test:${Date.now()}`;
     const tickers = extractTickers(rule);
@@ -125,10 +138,11 @@ export class MockAlertProvider implements AlertProvider {
       firedAt: now,
     };
 
-    const channelResults: NotificationChannelResult[] = channels.map((channel) => ({
-      channel,
-      status: "sent",
-    }));
+    // Use the caller-supplied real outcomes when present; otherwise fall back to
+    // `sent` for each requested channel (preview-only callers).
+    const resolvedChannels: NotificationChannelResult[] =
+      channelResults ?? channels.map((channel) => ({ channel, status: "sent" as const }));
+    const anySent = resolvedChannels.some((c) => c.status === "sent");
 
     const log: NotificationLog = {
       id: eventId,
@@ -137,9 +151,10 @@ export class MockAlertProvider implements AlertProvider {
       kind: rule.kind,
       firedAt: event.firedAt,
       evaluatedAt: event.evaluatedAt,
-      sentAt: event.sentAt,
+      // Only stamp a delivery time when at least one channel actually sent.
+      sentAt: anySent ? event.sentAt : undefined,
       message,
-      channels: channelResults,
+      channels: resolvedChannels,
       isTest: true,
       ruleName: rule.name,
       ...(tickers.length ? { tickers } : {}),

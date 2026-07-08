@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node scripts/generate-firebase-sw.mjs && next dev",
+    "build": "node scripts/generate-firebase-sw.mjs && next build",
+    "generate:sw": "node scripts/generate-firebase-sw.mjs",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit"
