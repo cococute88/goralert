@@ -109,6 +109,26 @@ pipeline with zero credentials, run the test suite (it uses fakes).
 `custom`/`composite` appear in multiple scopes because they may wrap any kind;
 eventId idempotency prevents double-firing across overlapping scopes.
 
+### Test-push drain (single source of truth)
+
+The web "테스트 Push / Telegram" buttons do **not** deliver in the browser. They
+enqueue a request at `users/{uid}/testPushRequests/{id}`; the engine drains it
+through the **same** production delivery path as scheduled alerts:
+
+```
+python -m alert_engine.main --test-push [--uid UID]
+  -> test_push.process_test_requests
+    -> AlertEngine.send_test_alert
+      -> deliver()                    # retry / backoff / isolation
+        -> channels["push"]  == PushChannel   (build_default_channels)
+          -> messaging.send_each_for_multicast -> FCM
+```
+
+There is exactly one push implementation (`channels/push.py`); test and
+production share it, so a change to `PushChannel` changes both. The drain runs
+on `.github/workflows/alert-test-push.yml` (5-min cron + manual dispatch).
+Verified by `tests/test_test_push_drain.py`.
+
 ---
 
 ## Run tests

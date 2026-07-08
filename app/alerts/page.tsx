@@ -9,8 +9,13 @@ import { useRouter } from "next/navigation";
 import { Copy, Loader2, Pencil, Plus, Send, Star, Trash2 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule } from "@/lib/alerts/types";
-import { deleteAlertRule, loadAlertRules, setAlertRuleEnabled } from "@/lib/alerts/repositories";
-import { alertProvider } from "@/lib/alerts/provider";
+import {
+  deleteAlertRule,
+  enqueueTestPushRequest,
+  loadAlertRules,
+  setAlertRuleEnabled,
+  waitForTestPushResult,
+} from "@/lib/alerts/repositories";
 import { cloneRuleToDraft } from "@/lib/alerts/clone";
 import { formatNextOccurrence, nextOccurrence } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, ConfirmDialog, EmptyState, Toggle } from "@/components/alerts/ui";
@@ -47,12 +52,28 @@ function RuleCard({
     }
   };
 
+  // Enqueue a test through the SAME production path (engine -> PushChannel);
+  // no in-browser delivery, no fabricated "sent" — the outcome is the engine's
+  // real channel result, written to the isTest NotificationLog (기록 탭).
   const handleTest = async () => {
     setTesting(true);
     try {
-      const log = await alertProvider.sendTest(uid, rule, rule.delivery.channels);
-      const channels = log.channels.map((c) => c.channel).join(", ");
-      toast.success(`테스트 발송 완료 (${channels || "채널 없음"})`);
+      const requestId = await enqueueTestPushRequest(uid, {
+        channels: rule.delivery.channels,
+        message: rule.delivery.message,
+      });
+      toast.show("테스트 발송을 요청했어요 · 처리되면 기록 탭에 남습니다", "info");
+      const result = await waitForTestPushResult(uid, requestId);
+      if (!result) return; // still pending — check 기록 탭 shortly.
+      const results = result.results ?? [];
+      const failed = results.filter((c) => c.status === "failed");
+      if (result.status !== "done" || failed.length > 0) {
+        const detail = failed[0]?.error ? ` — ${failed[0].error}` : result.error ? ` — ${result.error}` : "";
+        toast.error(`테스트 발송 실패${detail} · 기록 탭에서 확인하세요`);
+      } else {
+        const sent = results.filter((c) => c.status === "sent").map((c) => c.channel).join(", ");
+        toast.success(`테스트 발송 완료 (${sent || "채널 없음"})`);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "테스트 발송에 실패했습니다");
     } finally {

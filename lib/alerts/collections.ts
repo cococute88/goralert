@@ -12,6 +12,9 @@ export const ALERT_COLLECTIONS = {
   alertSettings: "alertSettings",
   alertTemplates: "alertTemplates",
   calendarAlertMarks: "calendarAlertMarks",
+  // Browser -> engine bridge: the test buttons enqueue a request here that the
+  // Python engine drains through the production delivery path (PushChannel).
+  testPushRequests: "testPushRequests",
 } as const;
 
 // Singleton doc id for the per-user alert settings document.
@@ -75,4 +78,16 @@ export function calendarAlertMarkDoc(db: Firestore, uid: string, id: string): Do
 
 export function alertSettingsDoc(db: Firestore, uid: string): DocumentReference {
   return doc(db, ...alertSettingsDocPath(uid));
+}
+
+export function testPushRequestsColPath(uid: string): [string, string, string] {
+  return ["users", uid, ALERT_COLLECTIONS.testPushRequests];
+}
+
+export function testPushRequestsCol(db: Firestore, uid: string): CollectionReference {
+  return collection(db, ...testPushRequestsColPath(uid));
+}
+
+export function testPushRequestDoc(db: Firestore, uid: string, id: string): DocumentReference {
+  return doc(db, ...testPushRequestsColPath(uid), id);
 }

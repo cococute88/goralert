@@ -263,48 +263,12 @@ export async function unregisterPushToken(uid: string): Promise<RegisterPushResu
   }
 }
 
-export type TestPushResult = {
-  ok: boolean;
-  error?: string;
-};
-
-// Sends a REAL test push to this device by displaying a notification through the
-// registered service worker. This genuinely exercises the browser push pipeline
-// (permission → active service worker → showNotification), so the caller can
-// record the history log as `sent` ONLY when this actually succeeds. A pure
-// server FCM round-trip is the Python engine's job; this in-app test verifies the
-// device-side delivery path that users interact with from the settings screen.
-export async function sendTestPush(message: { title: string; body: string }): Promise<TestPushResult> {
-  if (typeof window === "undefined") {
-    return { ok: false, error: "브라우저에서만 테스트 푸시를 보낼 수 있습니다." };
-  }
-  if (typeof Notification === "undefined" || !("serviceWorker" in navigator)) {
-    return { ok: false, error: "이 브라우저에서는 푸시 알림을 사용할 수 없습니다." };
-  }
-  if (Notification.permission !== "granted") {
-    return {
-      ok: false,
-      error: "알림 권한이 없습니다. 먼저 ‘이 기기 알림 등록’으로 권한을 허용해 주세요.",
-    };
-  }
-  try {
-    // registerServiceWorker() already awaits navigator.serviceWorker.ready, so
-    // the returned registration has an active worker for showNotification().
-    const registration = await registerServiceWorker();
-    await registration.showNotification(message.title, {
-      body: message.body,
-      icon: "/gorani-logo.png",
-      badge: "/gorani-logo.png",
-      data: { url: "/" },
-    });
-    return { ok: true };
-  } catch (err) {
-    return {
-      ok: false,
-      error: err instanceof Error ? err.message : "테스트 푸시 발송에 실패했습니다.",
-    };
-  }
-}
+// NOTE: there is intentionally NO in-browser "test push" here. A real test send
+// must exercise the production delivery path (Python engine -> PushChannel ->
+// FCM), so the settings/alerts screens ENQUEUE a request via
+// repositories.enqueueTestPushRequest and the engine delivers it. A local
+// showNotification() would be a *different* code path from production and is
+// therefore not used to test push (single-source-of-truth requirement).
 
 // Subscribes to foreground messages (received while the tab is focused).
 // Returns an unsubscribe function, or a no-op when messaging is unavailable.

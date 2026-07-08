@@ -6,25 +6,28 @@
 //   - Telegram 설정: telegramChatId
 //   - Push 설정: 이 기기 알림 등록(실제 FCM) + 등록된 기기 수 + 권한 상태
 //   - 기본 알림 시간 / 기본 문구 / 전체 사용 토글
-//   - 채널 테스트(REQ-039): 합성 AlertRule 로 alertProvider.sendTest 호출 → isTest 로그 기록
+//   - 채널 테스트(REQ-039): testPushRequests 큐에 요청을 넣으면 Python 엔진이
+//     운영과 동일한 경로(send_test_alert → PushChannel)로 발송하고 isTest 로그를 남김
 
 import { useEffect, useState } from "react";
 import { LogOut, Loader2, Save, Send, Smartphone, BellOff } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type {
-  AlertRule,
   AlertSettings,
   DeliveryChannel,
-  NotificationChannelResult,
+  MessageTemplate,
 } from "@/lib/alerts/types";
-import { loadAlertSettings, saveAlertSettings } from "@/lib/alerts/repositories";
+import {
+  enqueueTestPushRequest,
+  loadAlertSettings,
+  saveAlertSettings,
+  waitForTestPushResult,
+} from "@/lib/alerts/repositories";
 import {
   isPushSupported,
   registerPushToken,
-  sendTestPush,
   unregisterPushToken,
 } from "@/lib/alerts/fcm-client";
-import { alertProvider } from "@/lib/alerts/provider";
 import { Badge, Button, Card, CardSection, Toggle } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
@@ -53,26 +56,6 @@ function SectionCard({
 
 const FIELD_CLASS =
   "h-10 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-accent";
-
-// 채널 테스트용 최소 합성 규칙 (REQ-039). 저장되지 않고 sendTest 에만 쓰인다.
-function buildTestRule(uid: string, settings: AlertSettings, channels: DeliveryChannel[]): AlertRule {
-  return {
-    id: "settings-test",
-    uid,
-    kind: "date",
-    name: "설정 테스트",
-    enabled: true,
-    condition: { kind: "date" },
-    trigger: { mode: "once" },
-    delivery: {
-      channels,
-      message: {
-        title: settings.defaultMessageTitle?.trim() || "고라알림 테스트",
-        body: settings.defaultMessageBody?.trim() || "설정 화면에서 보낸 테스트 알림입니다",
-      },
-    },
-  };
-}
 
 export default function GoralertSettingsPage() {
   const toast = useToast();
@@ -203,55 +186,37 @@ export default function GoralertSettingsPage() {
     }
   };
 
+  // Test sends go through the SAME production path as scheduled alerts. The
+  // browser only ENQUEUES a request (users/{uid}/testPushRequests); the Python
+  // engine drains it via send_test_alert -> deliver -> PushChannel/TelegramChannel
+  // and writes the isTest NotificationLog. There is no in-browser delivery and no
+  // fabricated "sent": the outcome shown here is the engine's real channel result.
   const handleTest = async (key: string, channels: DeliveryChannel[]) => {
     if (!user) return;
     setTesting(key);
     try {
-      const rule = buildTestRule(user.uid, settings, channels);
-      const message = rule.delivery.message ?? { title: "고라알림 테스트", body: "" };
+      const message: MessageTemplate = {
+        title: settings.defaultMessageTitle?.trim() || "고라알림 테스트",
+        body: settings.defaultMessageBody?.trim() || "설정 화면에서 보낸 테스트 알림입니다",
+      };
+      const requestId = await enqueueTestPushRequest(user.uid, { channels, message });
+      toast.show("테스트 발송을 요청했어요 · 엔진이 처리하면 기록 탭에 남습니다", "info");
 
-      // Determine the REAL outcome per channel. Push is actually delivered to this
-      // device via the service worker; only mark it `sent` when it truly displays.
-      const channelResults: NotificationChannelResult[] = [];
-      for (const channel of channels) {
-        if (channel === "push") {
-          const result = await sendTestPush(message);
-          channelResults.push(
-            result.ok
-              ? { channel, status: "sent" }
-              : { channel, status: "failed", error: result.error ?? "테스트 푸시 발송 실패" },
-          );
-        } else {
-          // Telegram: the bot token is a server-only secret (the web app has no
-          // API route to call the Telegram API), so actual delivery is performed
-          // and verified by the Python engine. What the web app CAN verify is the
-          // precondition: without a Chat ID, Telegram delivery is impossible —
-          // report that as a real failure instead of a fake "sent" (REQ-022.4,
-          // mirrors alert_engine _test_has_credentials / TelegramChannel).
-          const chatId = settings.telegramChatId?.trim();
-          channelResults.push(
-            chatId
-              ? { channel, status: "sent" }
-              : {
-                  channel,
-                  status: "failed",
-                  error: "Telegram Chat ID가 설정되지 않았습니다. 위 Telegram 설정에서 Chat ID를 입력하세요.",
-                },
-          );
-        }
-      }
+      // Best-effort: surface the engine's real result if it lands while we wait.
+      // (Delivery runs on the alert-test-push workflow; up to a few minutes.)
+      const label = (c: DeliveryChannel) => (c === "telegram" ? "Telegram" : "Push");
+      const result = await waitForTestPushResult(user.uid, requestId);
+      if (!result) return; // still pending — the user can check 기록 탭 shortly.
 
-      const log = await alertProvider.sendTest(user.uid, rule, channels, channelResults);
-
-      const failed = log.channels.filter((c) => c.status === "failed");
-      const sent = log.channels.filter((c) => c.status === "sent");
-      const label = (c: NotificationChannelResult) => (c.channel === "telegram" ? "Telegram" : "Push");
-
-      if (failed.length > 0) {
-        const detail = failed[0].error ? ` — ${failed[0].error}` : "";
-        toast.error(`${failed.map(label).join(", ")} 발송 실패${detail} · 기록 탭에서 확인하세요`);
+      const results = result.results ?? [];
+      const failed = results.filter((c) => c.status === "failed");
+      const sent = results.filter((c) => c.status === "sent");
+      if (result.status !== "done" || failed.length > 0) {
+        const detail = failed[0]?.error ? ` — ${failed[0].error}` : result.error ? ` — ${result.error}` : "";
+        const who = failed.map((c) => label(c.channel)).join(", ") || channels.map(label).join(", ");
+        toast.error(`${who} 발송 실패${detail} · 기록 탭에서 확인하세요`);
       } else {
-        toast.success(`테스트 발송 완료 (${sent.map(label).join(", ") || "채널 없음"}) · 기록 탭에서 확인하세요`);
+        toast.success(`테스트 발송 완료 (${sent.map((c) => label(c.channel)).join(", ") || "채널 없음"}) · 기록 탭에서 확인하세요`);
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "테스트 발송에 실패했습니다");
