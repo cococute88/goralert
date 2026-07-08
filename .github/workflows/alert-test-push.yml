@@ -5,8 +5,11 @@ name: Goralert Test Push Drain
 # (python -m alert_engine.main --test-push -> send_test_alert -> PushChannel).
 #
 # The web "테스트 Push / Telegram" buttons only WRITE a request document; this
-# workflow is what actually delivers it via FCM/Telegram. A short cron keeps the
-# click-to-delivery latency low; workflow_dispatch allows an on-demand drain.
+# workflow is what actually delivers it via FCM/Telegram (through the SAME
+# PushChannel as production). PRIMARY trigger: the button fires workflow_dispatch
+# immediately via the thin /api/test-push bridge, so delivery starts within
+# seconds of the click. The short cron is only a FALLBACK for requests whose
+# immediate dispatch failed (e.g. GITHUB_DISPATCH_TOKEN not configured).
 #
 # GitHub Actions cron is UTC and best-effort (may lag a few minutes under load).
 

@@ -125,9 +125,15 @@ python -m alert_engine.main --test-push [--uid UID]
 ```
 
 There is exactly one push implementation (`channels/push.py`); test and
-production share it, so a change to `PushChannel` changes both. The drain runs
-on `.github/workflows/alert-test-push.yml` (5-min cron + manual dispatch).
-Verified by `tests/test_test_push_drain.py`.
+production share it, so a change to `PushChannel` changes both.
+
+Trigger: the web button enqueues the request, then calls a thin server bridge
+(`app/api/test-push`) that fires `alert-test-push.yml` via **workflow_dispatch**
+immediately (scoped to that `uid`) — no waiting for cron. The bridge holds no
+push logic; it only dispatches. The 5-min cron on the same workflow is a
+fallback for requests whose immediate dispatch failed. Production alerts keep
+their own untouched cron in `alert-engine.yml`. Verified by
+`tests/test_test_push_drain.py`.
 
 ---
 

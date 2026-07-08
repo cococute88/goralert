@@ -28,6 +28,7 @@ import {
   registerPushToken,
   unregisterPushToken,
 } from "@/lib/alerts/fcm-client";
+import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
 import { Badge, Button, Card, CardSection, Toggle } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
@@ -186,11 +187,12 @@ export default function GoralertSettingsPage() {
     }
   };
 
-  // Test sends go through the SAME production path as scheduled alerts. The
-  // browser only ENQUEUES a request (users/{uid}/testPushRequests); the Python
-  // engine drains it via send_test_alert -> deliver -> PushChannel/TelegramChannel
-  // and writes the isTest NotificationLog. There is no in-browser delivery and no
-  // fabricated "sent": the outcome shown here is the engine's real channel result.
+  // Test sends go through the SAME production path as scheduled alerts:
+  //   1) ENQUEUE users/{uid}/testPushRequests (no in-browser delivery)
+  //   2) fire the alert-test-push workflow immediately (thin /api/test-push bridge)
+  //   3) the Python engine drains it via send_test_alert -> deliver -> PushChannel
+  //      and writes the isTest NotificationLog + the request result
+  //   4) observe the request doc for the engine's REAL channel result (no fake "sent")
   const handleTest = async (key: string, channels: DeliveryChannel[]) => {
     if (!user) return;
     setTesting(key);
@@ -199,14 +201,24 @@ export default function GoralertSettingsPage() {
         title: settings.defaultMessageTitle?.trim() || "고라알림 테스트",
         body: settings.defaultMessageBody?.trim() || "설정 화면에서 보낸 테스트 알림입니다",
       };
-      const requestId = await enqueueTestPushRequest(user.uid, { channels, message });
-      toast.show("테스트 발송을 요청했어요 · 엔진이 처리하면 기록 탭에 남습니다", "info");
-
-      // Best-effort: surface the engine's real result if it lands while we wait.
-      // (Delivery runs on the alert-test-push workflow; up to a few minutes.)
       const label = (c: DeliveryChannel) => (c === "telegram" ? "Telegram" : "Push");
+      const requestId = await enqueueTestPushRequest(user.uid, { channels, message });
+
+      // Trigger the engine immediately instead of waiting for the cron.
+      const dispatch = await dispatchTestPushWorkflow(user);
+      if (!dispatch.ok) {
+        // Still enqueued — the 5-min cron will pick it up — but tell the user the
+        // immediate trigger failed (req 6).
+        toast.error(`즉시 발송 트리거 실패 — ${dispatch.error} · 잠시 후 자동 처리됩니다`);
+      } else {
+        toast.show("테스트 발송을 시작했어요 · 결과를 기다리는 중…", "info");
+      }
+
       const result = await waitForTestPushResult(user.uid, requestId);
-      if (!result) return; // still pending — the user can check 기록 탭 shortly.
+      if (!result) {
+        toast.error("아직 결과가 확인되지 않았어요 · 잠시 후 기록 탭에서 확인하세요");
+        return;
+      }
 
       const results = result.results ?? [];
       const failed = results.filter((c) => c.status === "failed");
