@@ -10,7 +10,20 @@
 //     운영과 동일한 경로(send_test_alert → PushChannel)로 발송하고 isTest 로그를 남김
 
 import { useEffect, useState } from "react";
-import { LogOut, Loader2, Save, Send, Smartphone, BellOff } from "lucide-react";
+import Link from "next/link";
+import {
+  LogOut,
+  Loader2,
+  Save,
+  Send,
+  Smartphone,
+  BellOff,
+  CheckCircle2,
+  XCircle,
+  Circle,
+  ArrowRight,
+  ListChecks,
+} from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type {
   AlertSettings,
@@ -29,9 +42,174 @@ import {
   unregisterPushToken,
 } from "@/lib/alerts/fcm-client";
 import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
-import { Badge, Button, Card, CardSection, Toggle } from "@/components/alerts/ui";
+import { Badge, Button, Card, CardSection, Toggle, cx } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
+
+// --- Test-push progress UX (Release UX Polish Sprint) ------------------------
+// Purely presentational state machine over the EXISTING test-push flow
+// (enqueue -> workflow_dispatch -> engine drains via PushChannel/FCM). It does
+// NOT change any delivery logic — it only surfaces where a run currently is so
+// the user can understand the async pipeline:
+//   요청 접수 → GitHub Actions 시작 → 엔진 실행 중 → Push 발송 → 완료
+// and distinguishes the three failure points (Dispatch / Actions / FCM) plus the
+// 90s "still running, check 기록" guidance.
+
+type TestErrorStage = "request" | "dispatch" | "actions" | "fcm";
+
+type TestPhase =
+  | { kind: "idle" }
+  | { kind: "requested" } // 요청 접수
+  | { kind: "dispatching" } // GitHub Actions 시작
+  | { kind: "running" } // 엔진 실행 중
+  | { kind: "delivering" } // Push 발송
+  | { kind: "done"; channels: string } // 완료
+  | { kind: "timeout" } // 90s 초과 — 엔진은 계속 실행 중
+  | { kind: "error"; stage: TestErrorStage; message: string; who?: string };
+
+type StepStatus = "done" | "active" | "error" | "pending";
+
+const TEST_STEPS = [
+  "요청 접수",
+  "GitHub Actions 시작",
+  "엔진 실행 중",
+  "Push 발송",
+  "완료",
+] as const;
+
+// Index of the step a failure at `stage` maps onto.
+const ERROR_STEP_INDEX: Record<TestErrorStage, number> = {
+  request: 0,
+  dispatch: 1,
+  actions: 2,
+  fcm: 3,
+};
+
+function computeStepStatuses(phase: TestPhase): StepStatus[] {
+  const build = (activeIdx: number): StepStatus[] =>
+    TEST_STEPS.map((_, i) => (i < activeIdx ? "done" : i === activeIdx ? "active" : "pending"));
+
+  switch (phase.kind) {
+    case "requested":
+      return build(0);
+    case "dispatching":
+      return build(1);
+    case "running":
+    case "timeout":
+      return build(2);
+    case "delivering":
+      return build(3);
+    case "done":
+      return TEST_STEPS.map(() => "done");
+    case "error": {
+      const errIdx = ERROR_STEP_INDEX[phase.stage];
+      return TEST_STEPS.map((_, i) => (i < errIdx ? "done" : i === errIdx ? "error" : "pending"));
+    }
+    default:
+      return TEST_STEPS.map(() => "pending");
+  }
+}
+
+function StepIcon({ status }: { status: StepStatus }) {
+  if (status === "done") return <CheckCircle2 size={16} className="text-success" />;
+  if (status === "active") return <Loader2 size={16} className="animate-spin text-accent" />;
+  if (status === "error") return <XCircle size={16} className="text-danger" />;
+  return <Circle size={16} className="text-muted-foreground/40" />;
+}
+
+function errorText(phase: Extract<TestPhase, { kind: "error" }>): string {
+  const prefix =
+    phase.stage === "request"
+      ? "요청 접수 실패"
+      : phase.stage === "dispatch"
+        ? "Dispatch 실패 — GitHub Actions를 시작하지 못했습니다"
+        : phase.stage === "actions"
+          ? "Actions 실패 — 엔진 실행 중 오류가 발생했습니다"
+          : `FCM 발송 실패 — ${phase.who ?? "Push"} 전송에 실패했습니다`;
+  return phase.message ? `${prefix}\n${phase.message}` : prefix;
+}
+
+function TestPushProgress({ phase }: { phase: TestPhase }) {
+  if (phase.kind === "idle") return null;
+  const statuses = computeStepStatuses(phase);
+  const terminal = phase.kind === "done" || phase.kind === "timeout" || phase.kind === "error";
+
+  let message: string | null = null;
+  let messageTone = "text-muted-foreground";
+  if (phase.kind === "requested") message = "요청을 접수했어요…";
+  else if (phase.kind === "dispatching") message = "GitHub Actions를 시작하는 중…";
+  else if (phase.kind === "running") message = "엔진이 실행 중입니다…";
+  else if (phase.kind === "delivering") message = "Push를 발송하는 중…";
+  else if (phase.kind === "done") {
+    message = `발송 완료${phase.channels ? ` (${phase.channels})` : ""} · 기록 탭에서 확인하세요`;
+    messageTone = "text-success";
+  } else if (phase.kind === "timeout") {
+    // 요구사항 2: 90초 이상 걸릴 때의 안내.
+    message = "엔진이 실행 중입니다.\n기록 탭에서 결과를 확인할 수 있습니다.";
+    messageTone = "text-warning";
+  } else if (phase.kind === "error") {
+    message = errorText(phase);
+    messageTone = "text-danger";
+  }
+
+  return (
+    <div
+      className="mt-3 rounded-xl border border-border bg-background/60 p-3"
+      role="status"
+      aria-live="polite"
+    >
+      <ol>
+        {TEST_STEPS.map((label, i) => {
+          const status = statuses[i];
+          const isLast = i === TEST_STEPS.length - 1;
+          return (
+            <li key={label} className="flex gap-2.5">
+              <div className="flex flex-col items-center">
+                <StepIcon status={status} />
+                {!isLast ? (
+                  <span
+                    className={cx("my-0.5 w-px flex-1", status === "done" ? "bg-success/50" : "bg-border")}
+                    style={{ minHeight: 12 }}
+                  />
+                ) : null}
+              </div>
+              <span
+                className={cx(
+                  "pb-3 text-xs leading-4",
+                  status === "done"
+                    ? "text-foreground"
+                    : status === "active"
+                      ? "font-medium text-accent"
+                      : status === "error"
+                        ? "font-medium text-danger"
+                        : "text-muted-foreground",
+                )}
+              >
+                {label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+
+      {message ? (
+        <div className="mt-1 border-t border-border pt-2.5">
+          <p className={cx("whitespace-pre-line text-xs", messageTone)}>{message}</p>
+          {terminal ? (
+            <Link
+              href="/history"
+              className="mt-2.5 inline-flex h-8 items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+            >
+              <ListChecks size={14} />
+              기록으로 이동
+              <ArrowRight size={14} />
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function SectionCard({
   title,
@@ -66,6 +244,7 @@ export default function GoralertSettingsPage() {
   const [loading, setLoading] = useState(true);
   const [savingField, setSavingField] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const [phase, setPhase] = useState<TestPhase>({ kind: "idle" });
 
   // Push 등록 상태.
   const [registering, setRegistering] = useState(false);
@@ -194,43 +373,86 @@ export default function GoralertSettingsPage() {
   //      and writes the isTest NotificationLog + the request result
   //   4) observe the request doc for the engine's REAL channel result (no fake "sent")
   const handleTest = async (key: string, channels: DeliveryChannel[]) => {
-    if (!user) return;
+    // 요구사항 4/5: 이미 테스트가 진행 중이면 중복 클릭을 무시한다.
+    if (!user || testing) return;
     setTesting(key);
+    setPhase({ kind: "requested" }); // 요청 접수
+    const label = (c: DeliveryChannel) => (c === "telegram" ? "Telegram" : "Push");
     try {
       const message: MessageTemplate = {
         title: settings.defaultMessageTitle?.trim() || "고라알림 테스트",
         body: settings.defaultMessageBody?.trim() || "설정 화면에서 보낸 테스트 알림입니다",
       };
-      const label = (c: DeliveryChannel) => (c === "telegram" ? "Telegram" : "Push");
       const requestId = await enqueueTestPushRequest(user.uid, { channels, message });
 
       // Trigger the engine immediately instead of waiting for the cron.
+      setPhase({ kind: "dispatching" }); // GitHub Actions 시작
       const dispatch = await dispatchTestPushWorkflow(user);
       if (!dispatch.ok) {
-        // Still enqueued — the 5-min cron will pick it up — but tell the user the
-        // immediate trigger failed (req 6).
-        toast.error(`즉시 발송 트리거 실패 — ${dispatch.error} · 잠시 후 자동 처리됩니다`);
-      } else {
-        toast.show("테스트 발송을 시작했어요 · 결과를 기다리는 중…", "info");
+        // 요구사항 3: Dispatch 실패 (workflow_dispatch 트리거 자체 실패).
+        // 문서는 이미 큐에 있어 5분 주기 cron이 처리하지만, 즉시 트리거 실패를 알린다.
+        setPhase({
+          kind: "error",
+          stage: "dispatch",
+          message: `${dispatch.error ?? "워크플로우를 시작하지 못했어요"} · 잠시 후 자동 처리됩니다`,
+        });
+        toast.error(`Dispatch 실패 — ${dispatch.error ?? "워크플로우를 시작하지 못했어요"}`);
+        return;
       }
 
+      // 엔진 실행 중 — 엔진이 결과 문서를 확정할 때까지 관찰(최대 90초).
+      setPhase({ kind: "running" });
+      toast.show("테스트 발송을 시작했어요 · 결과를 기다리는 중…", "info");
       const result = await waitForTestPushResult(user.uid, requestId);
+
       if (!result) {
-        toast.error("아직 결과가 확인되지 않았어요 · 잠시 후 기록 탭에서 확인하세요");
+        // 요구사항 2: 90초 초과 — 실패가 아니라 "아직 실행 중" 안내.
+        setPhase({ kind: "timeout" });
+        toast.show("엔진이 실행 중입니다 · 기록 탭에서 결과를 확인하세요", "info");
         return;
       }
 
       const results = result.results ?? [];
       const failed = results.filter((c) => c.status === "failed");
       const sent = results.filter((c) => c.status === "sent");
+
+      if (result.status === "error") {
+        // 요구사항 3: Actions/엔진 실행 자체가 크래시한 경우.
+        setPhase({
+          kind: "error",
+          stage: "actions",
+          message: result.error ?? "엔진 실행 중 오류가 발생했습니다",
+        });
+        toast.error(`Actions 실패${result.error ? ` — ${result.error}` : ""} · 기록 탭에서 확인하세요`);
+        return;
+      }
+
       if (result.status !== "done" || failed.length > 0) {
+        // 요구사항 3: 채널(FCM/Telegram) 발송 실패.
         const detail = failed[0]?.error ? ` — ${failed[0].error}` : result.error ? ` — ${result.error}` : "";
         const who = failed.map((c) => label(c.channel)).join(", ") || channels.map(label).join(", ");
+        setPhase({
+          kind: "error",
+          stage: "fcm",
+          who,
+          message: failed[0]?.error ?? result.error ?? "발송에 실패했습니다",
+        });
         toast.error(`${who} 발송 실패${detail} · 기록 탭에서 확인하세요`);
-      } else {
-        toast.success(`테스트 발송 완료 (${sent.map((c) => label(c.channel)).join(", ") || "채널 없음"}) · 기록 탭에서 확인하세요`);
+        return;
       }
+
+      // 성공 — Push 발송 → 완료 단계를 짧게 노출한 뒤 완료 처리.
+      const who = sent.map((c) => label(c.channel)).join(", ") || "채널 없음";
+      setPhase({ kind: "delivering" });
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      setPhase({ kind: "done", channels: who });
+      toast.success(`테스트 발송 완료 (${who}) · 기록 탭에서 확인하세요`);
     } catch (err) {
+      setPhase({
+        kind: "error",
+        stage: "request",
+        message: err instanceof Error ? err.message : "테스트 발송에 실패했습니다",
+      });
       toast.error(err instanceof Error ? err.message : "테스트 발송에 실패했습니다");
     } finally {
       setTesting(null);
@@ -437,6 +659,9 @@ export default function GoralertSettingsPage() {
             둘 다 테스트
           </Button>
         </div>
+
+        {/* 진행 상황 스테퍼 (요구사항 1·2·3·6) */}
+        <TestPushProgress phase={phase} />
       </SectionCard>
     </div>
   );
