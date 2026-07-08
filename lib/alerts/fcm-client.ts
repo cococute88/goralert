@@ -13,7 +13,7 @@
 // reads users/{uid}/alertSettings.pushTokens to deliver push via the shared
 // service account — this is the web side that registers those tokens.
 
-import { getToken, isSupported, onMessage, type MessagePayload, type Messaging } from "firebase/messaging";
+import { deleteToken, getToken, isSupported, onMessage, type MessagePayload, type Messaging } from "firebase/messaging";
 import { firebaseApp } from "@/lib/firebase/client";
 import { loadAlertSettings, saveAlertSettings } from "./repositories";
 
@@ -78,6 +78,16 @@ async function persistToken(uid: string, token: string): Promise<void> {
   await saveAlertSettings(uid, { pushTokens: next });
 }
 
+// Removes a token from alertSettings.pushTokens. No-op when it isn't present so
+// the registered-device count only changes when a real token is dropped.
+async function removeToken(uid: string, token: string): Promise<void> {
+  const settings = await loadAlertSettings(uid);
+  const current = settings.pushTokens ?? [];
+  if (!current.includes(token)) return;
+  const next = current.filter((existing) => existing !== token);
+  await saveAlertSettings(uid, { pushTokens: next });
+}
+
 // Requests permission + registers an FCM token for this device, persisting it
 // to the user's alert settings. Safe to call from the browser only.
 export async function registerPushToken(uid: string): Promise<RegisterPushResult> {
@@ -138,6 +148,54 @@ export async function registerPushToken(uid: string): Promise<RegisterPushResult
     return {
       ok: false,
       error: err instanceof Error ? err.message : "푸시 등록 중 오류가 발생했습니다.",
+    };
+  }
+}
+
+// Unregisters THIS device: resolves the device's current FCM token, invalidates
+// the FCM registration (deleteToken), and removes the token from the user's
+// pushTokens so the registered-device count decreases and the Python engine
+// stops delivering to it. Best-effort by design — a browser whose permission was
+// revoked may not surface a token, but we still attempt deleteToken and report
+// the real outcome so the UI never claims a fake success.
+export async function unregisterPushToken(uid: string): Promise<RegisterPushResult> {
+  if (typeof window === "undefined") {
+    return { ok: false, error: "브라우저에서만 알림 등록을 해제할 수 있습니다." };
+  }
+
+  const messaging = await resolveMessaging();
+  if (!messaging) {
+    return {
+      ok: false,
+      error: "이 브라우저에서는 푸시 알림을 사용할 수 없습니다.",
+    };
+  }
+
+  try {
+    // Resolve this device's token first so we remove exactly it from settings.
+    let token: string | undefined;
+    const vapidKey = getVapidKey();
+    if (vapidKey && Notification.permission === "granted") {
+      try {
+        const registration = await registerServiceWorker();
+        token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration });
+      } catch {
+        token = undefined;
+      }
+    }
+
+    // Invalidate the FCM registration for this device.
+    await deleteToken(messaging);
+
+    // Drop this device's token from the persisted list (count decreases).
+    if (token) {
+      await removeToken(uid, token);
+    }
+    return { ok: true, token };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "알림 등록 해제 중 오류가 발생했습니다.",
     };
   }
 }

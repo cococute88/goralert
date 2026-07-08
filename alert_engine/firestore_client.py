@@ -91,32 +91,83 @@ def reset_client() -> None:
 # --- AlertRule reads ---------------------------------------------------------
 
 
+def _enabled_filter():
+    """Build an ``enabled == True`` filter using the keyword ``FieldFilter`` API.
+
+    The positional ``where("enabled", "==", True)`` form is deprecated and emits a
+    UserWarning on every run. ``FieldFilter`` is the supported form. Imported
+    lazily so the module still imports without ``google-cloud-firestore``.
+    """
+    from google.cloud.firestore_v1 import FieldFilter  # lazy import
+
+    return FieldFilter("enabled", "==", True)
+
+
+def _is_missing_index_error(exc: Exception) -> bool:
+    """True when ``exc`` is Firestore's "this query requires an index" error.
+
+    Collection-group queries with a field filter need a COLLECTION_GROUP-scoped
+    single-field index (``firestore.indexes.json`` → ``fieldOverrides``). When
+    that index has not been deployed, Firestore raises ``FailedPrecondition`` /
+    HTTP 400 whose message asks to create the index.
+    """
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    return name == "FailedPrecondition" or ("requires" in msg and "index" in msg)
+
+
 def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
     """List enabled rules.
 
     - When ``uid`` is given: query ``users/{uid}/alertRules`` where enabled==True.
     - Otherwise: use a collection_group query across all users' ``alertRules``.
 
-    The collection_group path requires a Firestore index on (enabled) for the
-    ``alertRules`` group — see the deploy doc.
+    The collection_group path is most efficient with a COLLECTION_GROUP index on
+    (enabled) for the ``alertRules`` group (see ``firestore.indexes.json``). When
+    that index has not been deployed to the project, Firestore rejects the
+    filtered query with a "requires an index" error; rather than failing the
+    whole run we fall back to an unfiltered collection_group scan and filter
+    ``enabled == True`` in memory, so the engine keeps working until the index is
+    deployed (``firebase deploy --only firestore:indexes``).
     """
     db = get_db()
     rules: List[AlertRule] = []
 
     if uid:
         col = db.collection("users").document(uid).collection(ALERT_RULES)
-        query = col.where("enabled", "==", True)
+        query = col.where(filter=_enabled_filter())
         for snap in query.stream():
-            rule = AlertRule.from_dict({"id": snap.id, **(snap.to_dict() or {})})
+            data = snap.to_dict() or {}
+            if data.get("enabled") is not True:
+                continue
+            rule = AlertRule.from_dict({"id": snap.id, **data})
             if not rule.uid:
                 rule.uid = uid
             rules.append(rule)
         return rules
 
-    # All users via collection_group.
-    group = db.collection_group(ALERT_RULES).where("enabled", "==", True)
-    for snap in group.stream():
+    # All users via collection_group. Prefer the indexed (filtered) query; on a
+    # missing-index error, fall back to an unfiltered scan + in-memory filter.
+    try:
+        group = db.collection_group(ALERT_RULES).where(filter=_enabled_filter())
+        snaps = list(group.stream())
+    except Exception as exc:  # noqa: BLE001
+        if not _is_missing_index_error(exc):
+            raise
+        logger.warning(
+            "collection-group index for alertRules.enabled is missing (%s); "
+            "falling back to an unfiltered scan + in-memory filter. Deploy "
+            "firestore.indexes.json (firebase deploy --only firestore:indexes) "
+            "to restore the efficient path.",
+            exc,
+        )
+        snaps = list(db.collection_group(ALERT_RULES).stream())
+
+    for snap in snaps:
         data = snap.to_dict() or {}
+        # Guard: the fallback path returns disabled rules too, so filter here.
+        if data.get("enabled") is not True:
+            continue
         rule = AlertRule.from_dict({"id": snap.id, **data})
         if not rule.uid:
             rule.uid = _extract_uid_from_path(snap)
