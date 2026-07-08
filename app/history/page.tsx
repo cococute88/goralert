@@ -11,7 +11,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ListChecks, Loader2, Search, X } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertKind, DeliveryChannel, NotificationLog } from "@/lib/alerts/types";
-import { loadNotificationLogs, searchNotificationLogs } from "@/lib/alerts/repositories";
+import {
+  loadNotificationLogs,
+  searchNotificationLogs,
+  watchPendingTestPushRequests,
+} from "@/lib/alerts/repositories";
 import { Badge, Button, Card, CardSection, EmptyState, Toggle, cx } from "@/components/alerts/ui";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import { alertKindLabel } from "@/components/alerts/forms/AlertKindBadge";
@@ -158,6 +162,9 @@ export default function GoralertHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
 
+  // 아직 엔진이 처리하지 않은 테스트 발송 요청 수 ("처리 중" 표시용).
+  const [pendingTests, setPendingTests] = useState(0);
+
   // 캘린더 종류는 date 로 매핑(캘린더 기반 알림은 kind:"date"). 별도 칩으로 노출.
   const [calendarOnly, setCalendarOnly] = useState(false);
 
@@ -246,6 +253,28 @@ export default function GoralertHistoryPage() {
     };
   }, [user, runSearch]);
 
+  // 진행 중인 테스트 발송을 실시간 구독한다. 엔진이 아직 처리하지 않은 요청은
+  // NotificationLog 가 없어 목록에 안 보이므로, 여기서 "처리 중" 배너로 노출한다.
+  // 요청이 완료되어 pending 이 줄어들면 방금 쓰인 로그를 끌어오도록 검색을 갱신한다.
+  const runSearchRef = useRef(runSearch);
+  useEffect(() => {
+    runSearchRef.current = runSearch;
+  }, [runSearch]);
+  const prevPendingRef = useRef(0);
+  useEffect(() => {
+    if (!user) return;
+    prevPendingRef.current = 0;
+    const unsubscribe = watchPendingTestPushRequests(user.uid, (items) => {
+      setPendingTests(items.length);
+      if (items.length < prevPendingRef.current) {
+        // 하나 이상 완료됨 — 새로 기록된 로그를 반영하기 위해 목록을 새로고침.
+        void runSearchRef.current(user.uid);
+      }
+      prevPendingRef.current = items.length;
+    });
+    return unsubscribe;
+  }, [user]);
+
   if (authLoading) return <LoadingState />;
   if (!user) return <NoUserState />;
 
@@ -255,6 +284,20 @@ export default function GoralertHistoryPage() {
         <h1 className="text-lg font-bold text-foreground">발송 기록</h1>
         {searching ? <Loader2 size={16} className="animate-spin text-muted-foreground" /> : <Badge>{logs.length}</Badge>}
       </div>
+
+      {/* 진행 중 테스트 발송 안내 (아직 NotificationLog 가 없는 요청) */}
+      {pendingTests > 0 ? (
+        <div
+          className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent/5 px-3 py-2.5 text-xs text-accent"
+          role="status"
+          aria-live="polite"
+        >
+          <Loader2 size={14} className="animate-spin shrink-0" />
+          <span>
+            테스트 발송 {pendingTests}건이 아직 처리 중입니다 · 완료되면 아래 기록에 표시됩니다
+          </span>
+        </div>
+      ) : null}
 
       {/* 검색 박스 */}
       <div className="relative">
