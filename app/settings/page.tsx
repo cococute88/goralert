@@ -11,9 +11,14 @@
 import { useEffect, useState } from "react";
 import { LogOut, Loader2, Save, Send, Smartphone } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
-import type { AlertRule, AlertSettings, DeliveryChannel } from "@/lib/alerts/types";
+import type {
+  AlertRule,
+  AlertSettings,
+  DeliveryChannel,
+  NotificationChannelResult,
+} from "@/lib/alerts/types";
 import { loadAlertSettings, saveAlertSettings } from "@/lib/alerts/repositories";
-import { isPushSupported, registerPushToken } from "@/lib/alerts/fcm-client";
+import { isPushSupported, registerPushToken, sendTestPush } from "@/lib/alerts/fcm-client";
 import { alertProvider } from "@/lib/alerts/provider";
 import { Badge, Button, Card, CardSection, Toggle } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
@@ -172,9 +177,38 @@ export default function GoralertSettingsPage() {
     setTesting(key);
     try {
       const rule = buildTestRule(user.uid, settings, channels);
-      const log = await alertProvider.sendTest(user.uid, rule, channels);
-      const names = log.channels.map((c) => (c.channel === "telegram" ? "Telegram" : "Push")).join(", ");
-      toast.success(`테스트 발송 완료 (${names || "채널 없음"}) · 기록 탭에서 확인하세요`);
+      const message = rule.delivery.message ?? { title: "고라알림 테스트", body: "" };
+
+      // Determine the REAL outcome per channel. Push is actually delivered to this
+      // device via the service worker; only mark it `sent` when it truly displays.
+      const channelResults: NotificationChannelResult[] = [];
+      for (const channel of channels) {
+        if (channel === "push") {
+          const result = await sendTestPush(message);
+          channelResults.push(
+            result.ok
+              ? { channel, status: "sent" }
+              : { channel, status: "failed", error: result.error ?? "테스트 푸시 발송 실패" },
+          );
+        } else {
+          // Telegram delivery is handled by the Python engine; the web app cannot
+          // verify it, so it is logged as sent for this in-app test.
+          channelResults.push({ channel, status: "sent" });
+        }
+      }
+
+      const log = await alertProvider.sendTest(user.uid, rule, channels, channelResults);
+
+      const failed = log.channels.filter((c) => c.status === "failed");
+      const sent = log.channels.filter((c) => c.status === "sent");
+      const label = (c: NotificationChannelResult) => (c.channel === "telegram" ? "Telegram" : "Push");
+
+      if (failed.length > 0) {
+        const detail = failed[0].error ? ` — ${failed[0].error}` : "";
+        toast.error(`${failed.map(label).join(", ")} 발송 실패${detail} · 기록 탭에서 확인하세요`);
+      } else {
+        toast.success(`테스트 발송 완료 (${sent.map(label).join(", ") || "채널 없음"}) · 기록 탭에서 확인하세요`);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "테스트 발송에 실패했습니다");
     } finally {

@@ -6,3 +6,6 @@ __pycache__/
 .hypothesis/
 .pytest_cache/
 tsconfig.tsbuildinfo
+
+# Generated at dev/build time by scripts/generate-firebase-sw.mjs (env-injected).
+public/firebase-messaging-sw.js
