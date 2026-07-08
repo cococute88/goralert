@@ -322,6 +322,42 @@ export async function enqueueTestPushRequest(
   return ref.id;
 }
 
+// A pending (not-yet-drained) test-push request, surfaced in the 기록 탭 so an
+// in-flight test shows as "아직 처리 중" before the engine writes its NotificationLog.
+export type PendingTestPushRequest = {
+  id: string;
+  channels: DeliveryChannel[];
+  message?: MessageTemplate;
+};
+
+// Observe the caller's still-pending test-push requests in real time. Used by the
+// history screen to show a "처리 중" indicator while GitHub Actions/the engine is
+// still running (before any NotificationLog exists). Returns an unsubscribe fn.
+// Uses a single-field (status) equality filter — no composite index required.
+export function watchPendingTestPushRequests(
+  uid: string,
+  onChange: (items: PendingTestPushRequest[]) => void,
+): () => void {
+  if (!firestoreDb) return () => {};
+  const q = query(testPushRequestsCol(firestoreDb, uid), where("status", "==", "pending"));
+  return onSnapshot(
+    q,
+    (snap) => {
+      onChange(
+        snap.docs.map((docSnap) => {
+          const data = docSnap.data() as Partial<PendingTestPushRequest>;
+          return {
+            id: docSnap.id,
+            channels: data.channels ?? [],
+            message: data.message,
+          };
+        }),
+      );
+    },
+    () => onChange([]),
+  );
+}
+
 // Observe a test-push request until the engine finalizes it (or timeout).
 // Resolves with the terminal document (status !== "pending") whose `results`
 // reflect the real PushChannel/TelegramChannel outcome, or null on timeout.
