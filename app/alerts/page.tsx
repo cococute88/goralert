@@ -9,8 +9,14 @@ import { useRouter } from "next/navigation";
 import { Copy, Loader2, Pencil, Plus, Send, Star, Trash2 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule } from "@/lib/alerts/types";
-import { deleteAlertRule, loadAlertRules, setAlertRuleEnabled } from "@/lib/alerts/repositories";
-import { alertProvider } from "@/lib/alerts/provider";
+import {
+  deleteAlertRule,
+  enqueueTestPushRequest,
+  loadAlertRules,
+  setAlertRuleEnabled,
+  waitForTestPushResult,
+} from "@/lib/alerts/repositories";
+import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
 import { cloneRuleToDraft } from "@/lib/alerts/clone";
 import { formatNextOccurrence, nextOccurrence } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, ConfirmDialog, EmptyState, Toggle } from "@/components/alerts/ui";
@@ -30,6 +36,7 @@ function RuleCard({
 }) {
   const router = useRouter();
   const toast = useToast();
+  const { user } = useFirebaseAuth();
   const [enabled, setEnabled] = useState(rule.enabled);
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -47,12 +54,38 @@ function RuleCard({
     }
   };
 
+  // Enqueue a test through the SAME production path (engine -> PushChannel),
+  // then fire the workflow immediately (thin /api/test-push bridge). No
+  // in-browser delivery, no fabricated "sent" — the outcome is the engine's real
+  // channel result, written to the isTest NotificationLog (기록 탭).
   const handleTest = async () => {
+    if (!user) return;
     setTesting(true);
     try {
-      const log = await alertProvider.sendTest(uid, rule, rule.delivery.channels);
-      const channels = log.channels.map((c) => c.channel).join(", ");
-      toast.success(`테스트 발송 완료 (${channels || "채널 없음"})`);
+      const requestId = await enqueueTestPushRequest(uid, {
+        channels: rule.delivery.channels,
+        message: rule.delivery.message,
+      });
+      const dispatch = await dispatchTestPushWorkflow(user);
+      if (!dispatch.ok) {
+        toast.error(`즉시 발송 트리거 실패 — ${dispatch.error} · 잠시 후 자동 처리됩니다`);
+      } else {
+        toast.show("테스트 발송을 시작했어요 · 결과를 기다리는 중…", "info");
+      }
+      const result = await waitForTestPushResult(uid, requestId);
+      if (!result) {
+        toast.error("아직 결과가 확인되지 않았어요 · 잠시 후 기록 탭에서 확인하세요");
+        return;
+      }
+      const results = result.results ?? [];
+      const failed = results.filter((c) => c.status === "failed");
+      if (result.status !== "done" || failed.length > 0) {
+        const detail = failed[0]?.error ? ` — ${failed[0].error}` : result.error ? ` — ${result.error}` : "";
+        toast.error(`테스트 발송 실패${detail} · 기록 탭에서 확인하세요`);
+      } else {
+        const sent = results.filter((c) => c.status === "sent").map((c) => c.channel).join(", ");
+        toast.success(`테스트 발송 완료 (${sent || "채널 없음"})`);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "테스트 발송에 실패했습니다");
     } finally {

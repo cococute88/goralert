@@ -109,6 +109,32 @@ pipeline with zero credentials, run the test suite (it uses fakes).
 `custom`/`composite` appear in multiple scopes because they may wrap any kind;
 eventId idempotency prevents double-firing across overlapping scopes.
 
+### Test-push drain (single source of truth)
+
+The web "테스트 Push / Telegram" buttons do **not** deliver in the browser. They
+enqueue a request at `users/{uid}/testPushRequests/{id}`; the engine drains it
+through the **same** production delivery path as scheduled alerts:
+
+```
+python -m alert_engine.main --test-push [--uid UID]
+  -> test_push.process_test_requests
+    -> AlertEngine.send_test_alert
+      -> deliver()                    # retry / backoff / isolation
+        -> channels["push"]  == PushChannel   (build_default_channels)
+          -> messaging.send_each_for_multicast -> FCM
+```
+
+There is exactly one push implementation (`channels/push.py`); test and
+production share it, so a change to `PushChannel` changes both.
+
+Trigger: the web button enqueues the request, then calls a thin server bridge
+(`app/api/test-push`) that fires `alert-test-push.yml` via **workflow_dispatch**
+immediately (scoped to that `uid`) — no waiting for cron. The bridge holds no
+push logic; it only dispatches. The 5-min cron on the same workflow is a
+fallback for requests whose immediate dispatch failed. Production alerts keep
+their own untouched cron in `alert-engine.yml`. Verified by
+`tests/test_test_push_drain.py`.
+
 ---
 
 ## Run tests

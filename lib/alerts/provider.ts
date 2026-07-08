@@ -7,10 +7,13 @@
 // `alert_engine/` running on a GitHub Actions cron (see
 // .github/workflows/alert-engine.yml). It owns evaluation, gating, delivery,
 // and writing NotificationLogs to Firestore (the single source of truth).
-// This web `alertProvider` remains an in-app convenience for test sends /
-// preview only: `sendTest` writes an isTest NotificationLog that the
-// engine-side history view also surfaces (same Firestore documents). It does
-// not evaluate or deliver production alerts — that is the Python engine's job.
+// This web `alertProvider` remains an in-app convenience for PREVIEW only
+// (`evaluatePreview`). Test SENDS no longer go through `sendTest`: the settings
+// and alerts screens enqueue a request (repositories.enqueueTestPushRequest)
+// that the Python engine delivers through the SAME production path as scheduled
+// alerts (send_test_alert -> deliver -> PushChannel/TelegramChannel), so there
+// is exactly one send implementation. `sendTest` is retained only for the
+// interface/back-compat and is not wired to any UI button.
 
 import { appendNotificationLog } from "./repositories";
 import type {

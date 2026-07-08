@@ -60,6 +60,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="which rule kinds to process this run (default: all)",
     )
     parser.add_argument("--uid", default=None, help="restrict to a single user (default: all users)")
+    parser.add_argument(
+        "--test-push", action="store_true",
+        help="drain pending users/{uid}/testPushRequests via the production delivery path "
+             "(send_test_alert -> PushChannel) instead of processing rules",
+    )
     parser.add_argument("--dry-run", action="store_true", help="evaluate + log decisions but do not deliver or write")
     parser.add_argument("--window-minutes", type=int, default=None, help="override evaluation window")
     parser.add_argument("--verbose", action="store_true", help="debug logging")
@@ -93,6 +98,17 @@ def run(argv: Optional[List[str]] = None) -> int:
     if not cfg.has_firebase_credentials:
         logger.error("No Firebase credentials configured (FIREBASE_SERVICE_ACCOUNT or GOOGLE_APPLICATION_CREDENTIALS). Aborting.")
         return 2
+
+    # Test-push mode: drain the browser-enqueued testPushRequests queue through
+    # the SAME production delivery path (send_test_alert -> deliver -> PushChannel).
+    # This is what the web "테스트 Push/Telegram" buttons trigger, so test and
+    # production share one send implementation.
+    if args.test_push:
+        from . import test_push
+        counts = test_push.process_test_requests(args.uid, dry_run=args.dry_run)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        logger.info("engine done (test-push) :: %s elapsed=%.2fs", counts, elapsed)
+        return 0
 
     try:
         rules = firestore_client.list_enabled_rules(args.uid)

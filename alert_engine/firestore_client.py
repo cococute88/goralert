@@ -34,6 +34,7 @@ ALERT_SETTINGS_DOC_ID = "default"
 CALENDAR_EVENTS = "calendarEvents"
 CALENDAR_CUSTOM_EVENTS = "calendarCustomEvents"
 CALENDAR_ALERT_MARKS = "calendarAlertMarks"
+TEST_PUSH_REQUESTS = "testPushRequests"
 
 _db = None  # cached Firestore client
 
@@ -312,6 +313,88 @@ def write_notification_log(uid: str, log: NotificationLog) -> None:
         db.collection("users").document(uid)
         .collection(NOTIFICATION_LOGS).document(log.id)
         .set(payload)
+    )
+
+
+# --- Test-push request queue (browser -> engine bridge) ----------------------
+#
+# The web "테스트 Push/Telegram" buttons do NOT deliver in the browser. They
+# enqueue a request doc here; the Python engine drains it through the SAME
+# production path (send_test_alert -> deliver -> PushChannel/TelegramChannel),
+# so test and production share one delivery implementation. Client writes are
+# already permitted by firestore.rules (users/{uid}/**).
+
+
+def list_pending_test_requests(uid: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """List pending test-push requests, oldest first.
+
+    Each returned dict includes ``id`` and ``uid`` alongside the stored fields
+    (``channels``, ``message``, ``status`` …). When ``uid`` is given the query
+    is scoped to that user; otherwise a collection_group scan spans all users
+    (falling back to an unfiltered scan if the status index is not deployed).
+    """
+    from google.cloud.firestore_v1 import FieldFilter  # lazy import
+
+    db = get_db()
+    out: List[Dict[str, Any]] = []
+
+    if uid:
+        col = db.collection("users").document(uid).collection(TEST_PUSH_REQUESTS)
+        snaps = list(col.where(filter=FieldFilter("status", "==", "pending")).stream())
+        for snap in snaps:
+            out.append({"id": snap.id, "uid": uid, **(snap.to_dict() or {})})
+    else:
+        try:
+            group = db.collection_group(TEST_PUSH_REQUESTS).where(
+                filter=FieldFilter("status", "==", "pending")
+            )
+            snaps = list(group.stream())
+        except Exception as exc:  # noqa: BLE001
+            if not _is_missing_index_error(exc):
+                raise
+            logger.warning(
+                "collection-group index for testPushRequests.status is missing (%s); "
+                "falling back to an unfiltered scan + in-memory filter.",
+                exc,
+            )
+            snaps = list(db.collection_group(TEST_PUSH_REQUESTS).stream())
+        for snap in snaps:
+            data = snap.to_dict() or {}
+            if data.get("status") != "pending":
+                continue
+            out.append({"id": snap.id, "uid": _extract_uid_from_path(snap), **data})
+
+    # Oldest first so requests are handled roughly in order.
+    out.sort(key=lambda d: str(d.get("requestedAt") or ""))
+    return out[:limit] if limit else out
+
+
+def mark_test_request(
+    uid: str,
+    req_id: str,
+    status: str,
+    results: Optional[List[Dict[str, Any]]] = None,
+    log_id: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Finalize a test-push request with the engine's outcome (merge write)."""
+    from firebase_admin import firestore  # lazy import for SERVER_TIMESTAMP
+
+    db = get_db()
+    updates: Dict[str, Any] = {
+        "status": status,
+        "processedAt": firestore.SERVER_TIMESTAMP,
+    }
+    if results is not None:
+        updates["results"] = results
+    if log_id is not None:
+        updates["logId"] = log_id
+    if error is not None:
+        updates["error"] = error
+    (
+        db.collection("users").document(uid)
+        .collection(TEST_PUSH_REQUESTS).document(req_id)
+        .set(updates, merge=True)
     )
 
 
