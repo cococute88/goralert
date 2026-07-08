@@ -9,7 +9,7 @@
 //   - 채널 테스트(REQ-039): 합성 AlertRule 로 alertProvider.sendTest 호출 → isTest 로그 기록
 
 import { useEffect, useState } from "react";
-import { LogOut, Loader2, Save, Send, Smartphone } from "lucide-react";
+import { LogOut, Loader2, Save, Send, Smartphone, BellOff } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type {
   AlertRule,
@@ -18,7 +18,12 @@ import type {
   NotificationChannelResult,
 } from "@/lib/alerts/types";
 import { loadAlertSettings, saveAlertSettings } from "@/lib/alerts/repositories";
-import { isPushSupported, registerPushToken, sendTestPush } from "@/lib/alerts/fcm-client";
+import {
+  isPushSupported,
+  registerPushToken,
+  sendTestPush,
+  unregisterPushToken,
+} from "@/lib/alerts/fcm-client";
 import { alertProvider } from "@/lib/alerts/provider";
 import { Badge, Button, Card, CardSection, Toggle } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
@@ -80,6 +85,7 @@ export default function GoralertSettingsPage() {
 
   // Push 등록 상태.
   const [registering, setRegistering] = useState(false);
+  const [unregistering, setUnregistering] = useState(false);
   const [pushSupported, setPushSupported] = useState<boolean | null>(null);
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
 
@@ -172,6 +178,31 @@ export default function GoralertSettingsPage() {
     }
   };
 
+  const handleUnregisterToken = async () => {
+    if (!user) return;
+    setUnregistering(true);
+    try {
+      const result = await unregisterPushToken(user.uid);
+      if (result.ok) {
+        // 등록 해제 성공 — 이 기기 토큰을 로컬 상태에서도 제거.
+        setSettings((prev) => {
+          if (!prev.pushTokens?.length) return prev;
+          const next = result.token
+            ? prev.pushTokens.filter((t) => t !== result.token)
+            : prev.pushTokens.slice(0, -1);
+          return { ...prev, pushTokens: next };
+        });
+        toast.success("이 기기 알림 등록을 해제했어요");
+      } else {
+        toast.error(result.error ?? "알림 등록 해제에 실패했습니다");
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "알림 등록 해제에 실패했습니다");
+    } finally {
+      setUnregistering(false);
+    }
+  };
+
   const handleTest = async (key: string, channels: DeliveryChannel[]) => {
     if (!user) return;
     setTesting(key);
@@ -191,9 +222,22 @@ export default function GoralertSettingsPage() {
               : { channel, status: "failed", error: result.error ?? "테스트 푸시 발송 실패" },
           );
         } else {
-          // Telegram delivery is handled by the Python engine; the web app cannot
-          // verify it, so it is logged as sent for this in-app test.
-          channelResults.push({ channel, status: "sent" });
+          // Telegram: the bot token is a server-only secret (the web app has no
+          // API route to call the Telegram API), so actual delivery is performed
+          // and verified by the Python engine. What the web app CAN verify is the
+          // precondition: without a Chat ID, Telegram delivery is impossible —
+          // report that as a real failure instead of a fake "sent" (REQ-022.4,
+          // mirrors alert_engine _test_has_credentials / TelegramChannel).
+          const chatId = settings.telegramChatId?.trim();
+          channelResults.push(
+            chatId
+              ? { channel, status: "sent" }
+              : {
+                  channel,
+                  status: "failed",
+                  error: "Telegram Chat ID가 설정되지 않았습니다. 위 Telegram 설정에서 Chat ID를 입력하세요.",
+                },
+          );
         }
       }
 
@@ -302,11 +346,23 @@ export default function GoralertSettingsPage() {
           size="sm"
           className="w-full"
           onClick={() => void handleRegisterToken()}
-          disabled={registering || pushSupported === false || permission === "denied"}
+          disabled={registering || unregistering || pushSupported === false || permission === "denied"}
         >
           {registering ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
           이 기기 알림 등록
         </Button>
+        {pushCount > 0 ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="w-full"
+            onClick={() => void handleUnregisterToken()}
+            disabled={registering || unregistering || pushSupported === false}
+          >
+            {unregistering ? <Loader2 size={14} className="animate-spin" /> : <BellOff size={14} />}
+            이 기기 등록 해제
+          </Button>
+        ) : null}
         {pushSupported === false ? (
           <p className="text-[11px] text-muted-foreground">
             이 브라우저에서는 푸시 알림을 사용할 수 없습니다.

@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import AuthGate from "@/components/auth/AuthGate";
 import BottomNav from "@/components/alerts/BottomNav";
 import { ToastProvider } from "@/components/alerts/ui/toast";
+import PushServiceWorker from "@/components/alerts/PushServiceWorker";
 import { Bell } from "lucide-react";
 
 const APP_NAME = "고라알림";
@@ -56,6 +57,7 @@ export default function RootLayout({
       </head>
       <body>
         <ThemeProvider>
+          <PushServiceWorker />
           <AuthGate>
             <ToastProvider>
               <div className="min-h-screen bg-background text-foreground">
