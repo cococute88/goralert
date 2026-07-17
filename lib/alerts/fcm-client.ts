@@ -22,7 +22,7 @@
 // service account — this is the web side that registers those tokens.
 
 import { deleteToken, getToken, isSupported, onMessage, type MessagePayload, type Messaging } from "firebase/messaging";
-import { firebaseApp } from "@/lib/firebase/client";
+import { firebaseApp, isFirebaseConfigured } from "@/lib/firebase/client";
 import { loadAlertSettings, saveAlertSettings } from "./repositories";
 
 export type RegisterPushResult = {
@@ -31,7 +31,23 @@ export type RegisterPushResult = {
   error?: string;
 };
 
+export type PushDiagnostics = {
+  notificationApi: boolean;
+  serviceWorkerApi: boolean;
+  firebaseConfigured: boolean;
+  messagingSupported: boolean | null;
+  permission: NotificationPermission | "unsupported";
+  vapidKeyConfigured: boolean;
+  workerScriptReachable: boolean | null;
+  workerScope?: string;
+  workerState: { active: boolean; waiting: boolean; installing: boolean };
+  pushSubscription: boolean | null;
+  foregroundHandlerRegistered: boolean;
+  currentToken: { issued: boolean; stored: boolean | null; masked?: string; error?: string } | null;
+};
+
 const SERVICE_WORKER_URL = "/firebase-messaging-sw.js";
+let foregroundHandlerRegistered = false;
 
 // VAPID public key (Web Push). Generated in Firebase Console →
 // 프로젝트 설정 → Cloud Messaging → 웹 푸시 인증서. Exposed as a public env var.
@@ -278,10 +294,85 @@ export async function subscribeForegroundMessages(
   const messaging = await resolveMessaging();
   if (!messaging) return () => {};
   try {
-    return onMessage(messaging, handler);
+    foregroundHandlerRegistered = true;
+    const unsubscribe = onMessage(messaging, handler);
+    return () => {
+      foregroundHandlerRegistered = false;
+      unsubscribe();
+    };
   } catch {
     return () => {};
   }
+}
+
+// Read-only, explicit diagnostics for development/debug mode. This never logs a
+// token or PushSubscription endpoint and does not request notification permission.
+export async function getPushDiagnostics(uid?: string): Promise<PushDiagnostics> {
+  const notificationApi = typeof Notification !== "undefined";
+  const serviceWorkerApi = typeof navigator !== "undefined" && "serviceWorker" in navigator;
+  const initial: PushDiagnostics = {
+    notificationApi,
+    serviceWorkerApi,
+    firebaseConfigured: isFirebaseConfigured,
+    messagingSupported: null,
+    permission: notificationApi ? Notification.permission : "unsupported",
+    vapidKeyConfigured: Boolean(getVapidKey()),
+    workerScriptReachable: null,
+    workerState: { active: false, waiting: false, installing: false },
+    pushSubscription: null,
+    foregroundHandlerRegistered,
+    currentToken: null,
+  };
+  if (!serviceWorkerApi) return initial;
+
+  try {
+    initial.messagingSupported = await isSupported();
+  } catch {
+    initial.messagingSupported = false;
+  }
+  try {
+    const response = await fetch(SERVICE_WORKER_URL, { cache: "no-store" });
+    initial.workerScriptReachable = response.ok;
+  } catch {
+    initial.workerScriptReachable = false;
+  }
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) return initial;
+    initial.workerScope = registration.scope;
+    initial.workerState = {
+      active: Boolean(registration.active),
+      waiting: Boolean(registration.waiting),
+      installing: Boolean(registration.installing),
+    };
+    initial.pushSubscription = Boolean(await registration.pushManager.getSubscription());
+    // A token check is intentionally opt-in (only callers that pass uid, such
+    // as the development diagnostics panel). It never prints the full token.
+    if (uid && initial.permission === "granted" && getVapidKey()) {
+      const messaging = await resolveMessaging();
+      if (messaging) {
+        try {
+          const token = await getToken(messaging, { vapidKey: getVapidKey(), serviceWorkerRegistration: registration });
+          if (!token) {
+            initial.currentToken = { issued: false, stored: null, error: "empty-token" };
+          } else {
+            const settings = await loadAlertSettings(uid);
+            initial.currentToken = {
+              issued: true,
+              stored: (settings.pushTokens ?? []).includes(token),
+              masked: `${token.slice(0, 12)}…`,
+            };
+          }
+        } catch (err) {
+          initial.currentToken = { issued: false, stored: null, error: err instanceof Error ? err.name : "token-error" };
+        }
+      }
+    }
+  } catch {
+    // Keep the independently collected diagnostics; registration failure is
+    // represented by the absent scope/state instead of a fabricated success.
+  }
+  return initial;
 }
 
 // Convenience check the UI can use to decide whether to show the register
