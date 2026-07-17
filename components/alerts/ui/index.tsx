@@ -5,7 +5,7 @@
 // (bg-card / text-foreground / border-border / bg-accent ...). Kept intentionally
 // tiny and dependency-free so every Goralert screen looks consistent with Gorani.
 
-import { forwardRef } from "react";
+import { forwardRef, useEffect, useId, useRef } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 
 function cx(...parts: Array<string | false | null | undefined>): string {
@@ -200,25 +200,67 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const titleId = useId();
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogPanelRef = useRef<HTMLDivElement>(null);
+  const onCancelRef = useRef(onCancel);
+  const busyRef = useRef(busy);
+  onCancelRef.current = onCancel;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    if (!open) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    cancelButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busyRef.current) onCancelRef.current();
+      if (event.key === "Tab") {
+        const focusable = Array.from(
+          dialogPanelRef.current?.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) ?? [],
+        );
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previousFocus?.focus();
+    };
+  }, [open]);
+
   if (!open) return null;
   return (
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
       role="dialog"
       aria-modal="true"
-      aria-label={title}
-      onClick={onCancel}
+      aria-labelledby={titleId}
+      onClick={() => {
+        if (!busy) onCancel();
+      }}
     >
       <div
+        ref={dialogPanelRef}
         className="w-full max-w-xs rounded-2xl border border-border bg-card p-5 text-card-foreground shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
-        <p className="text-base font-semibold text-foreground">{title}</p>
+        <p id={titleId} className="text-base font-semibold text-foreground">{title}</p>
         {description ? (
           <div className="mt-1.5 text-sm text-muted-foreground">{description}</div>
         ) : null}
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="secondary" size="sm" onClick={onCancel} disabled={busy}>
+          <Button ref={cancelButtonRef} variant="secondary" size="sm" onClick={onCancel} disabled={busy}>
             {cancelLabel}
           </Button>
           <Button variant={tone} size="sm" onClick={onConfirm} disabled={busy}>
