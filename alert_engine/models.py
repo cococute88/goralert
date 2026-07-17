@@ -423,10 +423,44 @@ class AlertRule:
 
 
 @dataclass
+class PushDevice:
+    id: str
+    token: str
+    label: str = "알 수 없는 기기"
+    platform: str = "unknown"
+    browser: str = "unknown"
+    deviceType: str = "unknown"
+    registeredAt: Optional[str] = None
+    lastSeenAt: Optional[str] = None
+    tokenUpdatedAt: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["PushDevice"]:
+        if not isinstance(data, dict):
+            return None
+        device_id = _as_str(data.get("id"))
+        token = _as_str(data.get("token"))
+        if not device_id or not token:
+            return None
+        return cls(
+            id=device_id,
+            token=token,
+            label=_as_str(data.get("label")) or "알 수 없는 기기",
+            platform=_as_str(data.get("platform")) or "unknown",
+            browser=_as_str(data.get("browser")) or "unknown",
+            deviceType=_as_str(data.get("deviceType")) or "unknown",
+            registeredAt=_as_str(data.get("registeredAt")),
+            lastSeenAt=_as_str(data.get("lastSeenAt")),
+            tokenUpdatedAt=_as_str(data.get("tokenUpdatedAt")),
+        )
+
+
+@dataclass
 class AlertSettings:
     globalEnabled: bool = True
     telegramChatId: Optional[str] = None
     pushTokens: List[str] = field(default_factory=list)
+    pushDevices: List[PushDevice] = field(default_factory=list)
     defaultQuietHours: Optional[QuietHours] = None
     defaultAlertTime: Optional[str] = None
     defaultMessageTitle: Optional[str] = None
@@ -441,15 +475,38 @@ class AlertSettings:
             tokens = [t for t in tokens if isinstance(t, str) and t.strip()]
         else:
             tokens = []
+        devices: List[PushDevice] = []
+        seen_ids = set()
+        seen_device_tokens = set()
+        raw_devices = data.get("pushDevices")
+        if isinstance(raw_devices, list):
+            for raw_device in raw_devices:
+                device = PushDevice.from_dict(raw_device)
+                if not device or device.id in seen_ids or device.token in seen_device_tokens:
+                    continue
+                devices.append(device)
+                seen_ids.add(device.id)
+                seen_device_tokens.add(device.token)
         return cls(
             globalEnabled=bool(data.get("globalEnabled", True)),
             telegramChatId=_as_str(data.get("telegramChatId")),
             pushTokens=tokens,
+            pushDevices=devices,
             defaultQuietHours=QuietHours.from_dict(data.get("defaultQuietHours")),
             defaultAlertTime=_as_str(data.get("defaultAlertTime")),
             defaultMessageTitle=_as_str(data.get("defaultMessageTitle")),
             defaultMessageBody=_as_str(data.get("defaultMessageBody")),
         )
+
+    def delivery_tokens(self) -> List[str]:
+        """Device-metadata tokens first, then legacy tokens, de-duplicated."""
+        result: List[str] = []
+        seen = set()
+        for token in [device.token for device in self.pushDevices] + self.pushTokens:
+            if isinstance(token, str) and token.strip() and token not in seen:
+                result.append(token)
+                seen.add(token)
+        return result
 
 
 # --- AlertEvent --------------------------------------------------------------

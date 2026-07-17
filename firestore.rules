@@ -2,11 +2,48 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
 
-      match /{document=**} {
-        allow read, write: if request.auth != null && request.auth.uid == userId;
+    function validAlertSettings(data) {
+      return data.keys().hasOnly([
+          'globalEnabled',
+          'telegramChatId',
+          'pushTokens',
+          'pushDevices',
+          'defaultQuietHours',
+          'defaultAlertTime',
+          'defaultMessageTitle',
+          'defaultMessageBody',
+          'updatedAt'
+        ])
+        && (!('globalEnabled' in data) || data.globalEnabled is bool)
+        && (!('telegramChatId' in data) || (data.telegramChatId is string && data.telegramChatId.size() <= 128))
+        && (!('pushTokens' in data) || (data.pushTokens is list && data.pushTokens.size() <= 100))
+        // Rules cannot iterate over maps in an array. The client normalizes each
+        // device object; Rules still enforce the container type and product cap.
+        && (!('pushDevices' in data) || (data.pushDevices is list && data.pushDevices.size() <= 100))
+        && (!('defaultQuietHours' in data) || data.defaultQuietHours is map)
+        && (!('defaultAlertTime' in data) || (data.defaultAlertTime is string && data.defaultAlertTime.size() <= 16))
+        && (!('defaultMessageTitle' in data) || (data.defaultMessageTitle is string && data.defaultMessageTitle.size() <= 200))
+        && (!('defaultMessageBody' in data) || (data.defaultMessageBody is string && data.defaultMessageBody.size() <= 2000))
+        && (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /alertSettings/{settingsId} {
+        allow read, delete: if isOwner(userId);
+        allow create, update: if isOwner(userId) && validAlertSettings(request.resource.data);
+      }
+
+      // Keep the existing owner-only policy for all other user subcollections.
+      // Excluding alertSettings here ensures the validation above cannot be
+      // bypassed through an overlapping recursive allow rule.
+      match /{collectionId}/{document=**} {
+        allow read, write: if collectionId != 'alertSettings' && isOwner(userId);
       }
     }
   }

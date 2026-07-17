@@ -69,10 +69,12 @@ function ToastCard({ toast, onClose }: { toast: ToastItem; onClose: () => void }
   return (
     <button
       type="button"
+      role={toast.tone === "error" ? "alert" : "status"}
+      aria-live={toast.tone === "error" ? "assertive" : "polite"}
       onClick={onClose}
       className="pointer-events-auto flex w-full max-w-sm items-center gap-2 rounded-xl border border-border bg-card px-4 py-3 text-sm text-card-foreground shadow-lg"
     >
-      <Icon size={18} className={toneClass} />
+      <Icon size={18} className={toneClass} aria-hidden="true" />
       <span className="text-left">{toast.message}</span>
     </button>
   );

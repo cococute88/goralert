@@ -23,11 +23,32 @@
 
 import { deleteToken, getToken, isSupported, onMessage, type MessagePayload, type Messaging } from "firebase/messaging";
 import { firebaseApp, isFirebaseConfigured } from "@/lib/firebase/client";
-import { loadAlertSettings, saveAlertSettings } from "./repositories";
+import { generateId } from "./id";
+import {
+  loadAlertSettings,
+  removePushRegistrations,
+  upsertPushDevice,
+  type PushRegistrationSnapshot,
+} from "./repositories";
+import type {
+  PushDevice,
+  PushDeviceBrowser,
+  PushDevicePlatform,
+  PushDeviceType,
+} from "./types";
 
 export type RegisterPushResult = {
   ok: boolean;
+  deviceId?: string;
+  snapshot?: PushRegistrationSnapshot;
+  localCleanupFailed?: boolean;
+  error?: string;
+};
+
+export type CurrentPushRegistration = {
+  deviceId?: string;
   token?: string;
+  snapshot?: PushRegistrationSnapshot;
   error?: string;
 };
 
@@ -47,7 +68,120 @@ export type PushDiagnostics = {
 };
 
 const SERVICE_WORKER_URL = "/firebase-messaging-sw.js";
+const DEVICE_ID_STORAGE_PREFIX = "goralert.push-device-id.";
 let foregroundHandlerRegistered = false;
+
+function deviceIdStorageKey(uid: string): string {
+  return `${DEVICE_ID_STORAGE_PREFIX}${uid}`;
+}
+
+export function getStoredPushDeviceId(uid: string): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.localStorage.getItem(deviceIdStorageKey(uid))?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getOrCreatePushDeviceId(uid: string): string {
+  const existing = getStoredPushDeviceId(uid);
+  if (existing) return existing;
+  const created = generateId();
+  try {
+    window.localStorage.setItem(deviceIdStorageKey(uid), created);
+  } catch {
+    throw new Error("현재 기기 식별 정보를 저장할 수 없습니다. 브라우저 저장소 설정을 확인해 주세요.");
+  }
+  return created;
+}
+
+export function clearStoredPushDeviceId(uid: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.removeItem(deviceIdStorageKey(uid));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type NavigatorWithUserAgentData = Navigator & {
+  userAgentData?: { mobile?: boolean; platform?: string };
+};
+
+const PLATFORM_LABELS: Record<PushDevicePlatform, string> = {
+  android: "Android",
+  windows: "Windows",
+  macos: "macOS",
+  ios: "iOS",
+  linux: "Linux",
+  unknown: "알 수 없는 플랫폼",
+};
+
+const BROWSER_LABELS: Record<PushDeviceBrowser, string> = {
+  chrome: "Chrome",
+  "samsung-internet": "삼성 인터넷",
+  edge: "Edge",
+  safari: "Safari",
+  firefox: "Firefox",
+  unknown: "알 수 없는 브라우저",
+};
+
+function detectPlatform(userAgent: string, platformHint: string, touchPoints: number): PushDevicePlatform {
+  const combined = `${userAgent} ${platformHint}`;
+  if (/android/i.test(combined)) return "android";
+  if (/windows/i.test(combined)) return "windows";
+  if (/iphone|ipad|ipod/i.test(userAgent) || (/mac/i.test(combined) && touchPoints > 1)) return "ios";
+  if (/mac/i.test(combined)) return "macos";
+  if (/linux/i.test(combined)) return "linux";
+  return "unknown";
+}
+
+function detectBrowser(userAgent: string): PushDeviceBrowser {
+  if (/samsungbrowser/i.test(userAgent)) return "samsung-internet";
+  if (/edg(e|a|ios)?\//i.test(userAgent)) return "edge";
+  if (/firefox|fxios/i.test(userAgent)) return "firefox";
+  if (/chrome|crios/i.test(userAgent)) return "chrome";
+  if (/safari/i.test(userAgent)) return "safari";
+  return "unknown";
+}
+
+function detectDeviceType(userAgent: string, mobileHint: boolean | undefined, platform: PushDevicePlatform): PushDeviceType {
+  if (/ipad|tablet|playbook|silk/i.test(userAgent)) return "tablet";
+  if (platform === "android" && !/mobile/i.test(userAgent)) return "tablet";
+  if (mobileHint === true || /mobile|iphone|ipod/i.test(userAgent)) return "mobile";
+  if (["windows", "macos", "linux"].includes(platform)) return "desktop";
+  return "unknown";
+}
+
+export function detectPushDeviceMetadata(): Pick<PushDevice, "label" | "platform" | "browser" | "deviceType"> {
+  if (typeof navigator === "undefined") {
+    return { label: "알 수 없는 기기", platform: "unknown", browser: "unknown", deviceType: "unknown" };
+  }
+  const enhanced = navigator as NavigatorWithUserAgentData;
+  const userAgent = navigator.userAgent || "";
+  const platformHint = enhanced.userAgentData?.platform || navigator.platform || "";
+  const platform = detectPlatform(userAgent, platformHint, navigator.maxTouchPoints || 0);
+  const browser = detectBrowser(userAgent);
+  const deviceType = detectDeviceType(userAgent, enhanced.userAgentData?.mobile, platform);
+  const label = platform === "unknown" && browser === "unknown"
+    ? "알 수 없는 기기"
+    : `${PLATFORM_LABELS[platform]} · ${BROWSER_LABELS[browser]}`;
+  return { label, platform, browser, deviceType };
+}
+
+function buildPushDevice(uid: string, token: string): PushDevice {
+  const now = new Date().toISOString();
+  return {
+    id: getOrCreatePushDeviceId(uid),
+    token,
+    ...detectPushDeviceMetadata(),
+    registeredAt: now,
+    lastSeenAt: now,
+    tokenUpdatedAt: now,
+  };
+}
 
 // VAPID public key (Web Push). Generated in Firebase Console →
 // 프로젝트 설정 → Cloud Messaging → 웹 푸시 인증서. Exposed as a public env var.
@@ -127,26 +261,6 @@ export async function ensureServiceWorkerRegistered(): Promise<ServiceWorkerRegi
   }
 }
 
-// Appends a token to alertSettings.pushTokens, de-duplicating. No-op write is
-// avoided when the token is already registered.
-async function persistToken(uid: string, token: string): Promise<void> {
-  const settings = await loadAlertSettings(uid);
-  const current = settings.pushTokens ?? [];
-  if (current.includes(token)) return;
-  const next = Array.from(new Set([...current, token]));
-  await saveAlertSettings(uid, { pushTokens: next });
-}
-
-// Removes a token from alertSettings.pushTokens. No-op when it isn't present so
-// the registered-device count only changes when a real token is dropped.
-async function removeToken(uid: string, token: string): Promise<void> {
-  const settings = await loadAlertSettings(uid);
-  const current = settings.pushTokens ?? [];
-  if (!current.includes(token)) return;
-  const next = current.filter((existing) => existing !== token);
-  await saveAlertSettings(uid, { pushTokens: next });
-}
-
 // Requests permission + registers an FCM token for this device, persisting it
 // to the user's alert settings. Safe to call from the browser only.
 export async function registerPushToken(uid: string): Promise<RegisterPushResult> {
@@ -219,9 +333,25 @@ export async function registerPushToken(uid: string): Promise<RegisterPushResult
       console.warn("[push] getToken returned empty token");
       return { ok: false, error: "푸시 토큰을 발급받지 못했습니다. 잠시 후 다시 시도해 주세요." };
     }
-    console.log("[push] getToken success:", `${token.slice(0, 12)}…`);
-    await persistToken(uid, token);
-    return { ok: true, token };
+    console.log("[push] getToken success");
+    let device: PushDevice;
+    try {
+      device = buildPushDevice(uid, token);
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : "현재 기기 정보 확인에 실패했습니다.",
+      };
+    }
+    try {
+      const snapshot = await upsertPushDevice(uid, device);
+      return { ok: true, deviceId: device.id, snapshot };
+    } catch {
+      return {
+        ok: false,
+        error: "알림 기기 정보를 서버에 저장하지 못했습니다. 네트워크 상태를 확인해 주세요.",
+      };
+    }
   } catch (err) {
     console.error("[push] getToken failed", err);
     return {
@@ -251,30 +381,80 @@ export async function unregisterPushToken(uid: string): Promise<RegisterPushResu
   }
 
   try {
-    // Resolve this device's token first so we remove exactly it from settings.
-    let token: string | undefined;
-    const vapidKey = getVapidKey();
-    if (vapidKey && Notification.permission === "granted") {
-      try {
-        const registration = await registerServiceWorker();
-        token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration });
-      } catch {
-        token = undefined;
-      }
+    // Resolve only this browser's exact token/id. If neither is available we
+    // fail safely; there is deliberately no "remove the last array item"
+    // fallback because that could unregister another device.
+    const current = await inspectCurrentPushRegistration(uid, false);
+    if (!current.deviceId && !current.token) {
+      return { ok: false, error: "현재 기기 정보를 확인할 수 없습니다. 기기 목록에서 다시 선택해 주세요." };
     }
-
-    // Invalidate the FCM registration for this device.
-    await deleteToken(messaging);
-
-    // Drop this device's token from the persisted list (count decreases).
-    if (token) {
-      await removeToken(uid, token);
-    }
-    return { ok: true, token };
+    const snapshot = await removePushRegistrations(uid, [{
+      deviceId: current.deviceId,
+      token: current.token,
+    }]);
+    const cleanup = await deleteCurrentPushTokenLocally(uid);
+    return {
+      ok: true,
+      deviceId: current.deviceId,
+      snapshot,
+      localCleanupFailed: !cleanup.ok,
+      error: cleanup.error,
+    };
   } catch (err) {
     return {
       ok: false,
       error: err instanceof Error ? err.message : "알림 등록 해제 중 오류가 발생했습니다.",
+    };
+  }
+}
+
+// Checks the current browser without requesting permission. If this browser's
+// stable id already has a device entry, a token refresh and the throttled
+// `lastSeenAt` confirmation are persisted transactionally. An absent server
+// entry is never recreated here (important after an explicit full reset).
+export async function inspectCurrentPushRegistration(
+  uid: string,
+  confirmExisting = true,
+): Promise<CurrentPushRegistration> {
+  const deviceId = getStoredPushDeviceId(uid);
+  if (typeof window === "undefined" || typeof Notification === "undefined" || Notification.permission !== "granted") {
+    return { deviceId };
+  }
+  const vapidKey = getVapidKey();
+  const messaging = await resolveMessaging();
+  if (!vapidKey || !messaging) return { deviceId };
+  try {
+    const registration = await registerServiceWorker();
+    const token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration });
+    if (!token) return { deviceId, error: "현재 기기 정보 확인에 실패했습니다." };
+    if (!confirmExisting || !deviceId) return { deviceId, token };
+    const device = buildPushDevice(uid, token);
+    const snapshot = await upsertPushDevice(uid, device, { requireExistingDeviceId: true });
+    return { deviceId, token, snapshot };
+  } catch {
+    return { deviceId, error: "현재 기기 정보 확인에 실패했습니다." };
+  }
+}
+
+// Local cleanup applies only to the browser executing this function. The
+// server-side removal must be completed separately before calling it for a
+// selected device or a full reset. The local id is cleared even when FCM local
+// token deletion fails, and the partial failure is reported to the caller.
+export async function deleteCurrentPushTokenLocally(uid: string): Promise<{ ok: boolean; error?: string }> {
+  const idCleared = clearStoredPushDeviceId(uid);
+  const messaging = await resolveMessaging();
+  if (!messaging) {
+    return { ok: false, error: "현재 기기의 로컬 알림 정보를 삭제할 수 없는 브라우저입니다." };
+  }
+  try {
+    await deleteToken(messaging);
+    return idCleared
+      ? { ok: true }
+      : { ok: false, error: "현재 기기의 로컬 식별 정보를 삭제하지 못했습니다." };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "현재 기기의 로컬 알림 정보 삭제에 실패했습니다.",
     };
   }
 }

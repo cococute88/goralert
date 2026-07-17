@@ -23,28 +23,40 @@ import {
   Circle,
   ArrowRight,
   ListChecks,
+  ChevronDown,
+  ChevronUp,
+  RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type {
   AlertSettings,
   DeliveryChannel,
   MessageTemplate,
+  PushDevice,
+  PushDeviceBrowser,
+  PushDevicePlatform,
 } from "@/lib/alerts/types";
 import {
   enqueueTestPushRequest,
   loadAlertSettings,
+  removePushRegistrations,
+  resetPushRegistrations,
   saveAlertSettings,
   waitForTestPushResult,
+  type PushRegistrationTarget,
 } from "@/lib/alerts/repositories";
 import {
+  deleteCurrentPushTokenLocally,
+  inspectCurrentPushRegistration,
   isPushSupported,
   getPushDiagnostics,
   registerPushToken,
-  unregisterPushToken,
+  type CurrentPushRegistration,
   type PushDiagnostics,
 } from "@/lib/alerts/fcm-client";
 import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
-import { Badge, Button, Card, CardSection, Toggle, cx } from "@/components/alerts/ui";
+import { Badge, Button, Card, CardSection, ConfirmDialog, Toggle, cx } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 
@@ -229,6 +241,86 @@ function TestChannelResults({ results }: { results: Array<{ channel: DeliveryCha
   );
 }
 
+type PushDeviceListItem = {
+  key: string;
+  deviceId?: string;
+  token: string;
+  label: string;
+  detail: string;
+  timeLabel: string;
+  current: boolean;
+};
+
+const PUSH_PLATFORM_LABELS: Record<PushDevicePlatform, string> = {
+  android: "Android",
+  windows: "Windows",
+  macos: "macOS",
+  ios: "iOS",
+  linux: "Linux",
+  unknown: "알 수 없는 플랫폼",
+};
+
+const PUSH_BROWSER_LABELS: Record<PushDeviceBrowser, string> = {
+  chrome: "Chrome",
+  "samsung-internet": "삼성 인터넷",
+  edge: "Edge",
+  safari: "Safari",
+  firefox: "Firefox",
+  unknown: "알 수 없는 브라우저",
+};
+
+function formatPushDate(value?: string): string {
+  if (!value || Number.isNaN(Date.parse(value))) return "확인 시각 없음";
+  return new Intl.DateTimeFormat("ko-KR", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function legacyTokenKey(token: string): string {
+  // Stable UI-only fingerprint. The full token is never rendered or used as a
+  // React key; actual deletion still carries the exact selected token in memory.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < token.length; index += 1) {
+    hash ^= token.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `legacy:${token.length}:${(hash >>> 0).toString(36)}`;
+}
+
+function buildPushDeviceList(
+  settings: AlertSettings,
+  current: CurrentPushRegistration,
+): PushDeviceListItem[] {
+  const devices = (settings.pushDevices ?? []).filter(
+    (device): device is PushDevice => Boolean(device?.id && device?.token),
+  );
+  const linkedTokens = new Set(devices.map((device) => device.token));
+  const metadataItems = devices.map((device) => ({
+    key: `device:${device.id}`,
+    deviceId: device.id,
+    token: device.token,
+    label: device.label || "알 수 없는 기기",
+    detail: `${PUSH_PLATFORM_LABELS[device.platform]} · ${PUSH_BROWSER_LABELS[device.browser]}`,
+    timeLabel: `최근 확인 ${formatPushDate(device.lastSeenAt || device.registeredAt)}`,
+    current: device.id === current.deviceId || device.token === current.token,
+  }));
+  const legacyItems = Array.from(new Set(settings.pushTokens ?? []))
+    .filter((token) => token && !linkedTokens.has(token))
+    .map((token) => ({
+      key: legacyTokenKey(token),
+      token,
+      label: "기존 등록 기기",
+      detail: "기기 정보 없음",
+      timeLabel: "등록 시각 정보 없음",
+      current: token === current.token,
+    }));
+  return [...metadataItems, ...legacyItems];
+}
+
 function SectionCard({
   title,
   description,
@@ -267,7 +359,14 @@ export default function GoralertSettingsPage() {
 
   // Push 등록 상태.
   const [registering, setRegistering] = useState(false);
-  const [unregistering, setUnregistering] = useState(false);
+  const [removingDevices, setRemovingDevices] = useState(false);
+  const [resettingDevices, setResettingDevices] = useState(false);
+  const [deviceManagerOpen, setDeviceManagerOpen] = useState(false);
+  const [removeConfirmOpen, setRemoveConfirmOpen] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [selectedDevices, setSelectedDevices] = useState<Map<string, PushDeviceListItem>>(new Map());
+  const [currentPush, setCurrentPush] = useState<CurrentPushRegistration>({});
+  const [checkingCurrentPush, setCheckingCurrentPush] = useState(true);
   const [pushSupported, setPushSupported] = useState<boolean | null>(null);
   const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
   const [pushDiagnostics, setPushDiagnostics] = useState<PushDiagnostics | null>(null);
@@ -284,24 +383,37 @@ export default function GoralertSettingsPage() {
     let active = true;
     setLoading(true);
     loadAlertSettings(user.uid)
-      .then((loaded) => {
+      .then(async (loaded) => {
         if (!active) return;
         setSettings(loaded);
         setTelegramChatId(loaded.telegramChatId ?? "");
         setDefaultAlertTime(loaded.defaultAlertTime ?? "");
         setDefaultMessageTitle(loaded.defaultMessageTitle ?? "");
         setDefaultMessageBody(loaded.defaultMessageBody ?? "");
+        const current = await inspectCurrentPushRegistration(user.uid);
+        if (!active) return;
+        setCurrentPush(current);
+        if (current.error) toast.error(current.error);
+        if (current.snapshot?.changed) {
+          setSettings((previous) => ({ ...previous, ...current.snapshot }));
+        }
       })
       .catch(() => {
-        if (active) setSettings({ globalEnabled: true });
+        if (active) {
+          setSettings({ globalEnabled: true });
+          toast.error("기기 목록 불러오기에 실패했습니다.");
+        }
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setCheckingCurrentPush(false);
+        }
       });
     return () => {
       active = false;
     };
-  }, [user]);
+  }, [toast, user]);
 
   // 푸시 지원 여부 + 현재 권한 상태 감지(클라이언트 전용).
   useEffect(() => {
@@ -342,13 +454,9 @@ export default function GoralertSettingsPage() {
     setRegistering(true);
     try {
       const result = await registerPushToken(user.uid);
-      if (result.ok && result.token) {
-        // 등록 성공 — 로컬 상태도 갱신(dedupe).
-        setSettings((prev) => {
-          const current = prev.pushTokens ?? [];
-          if (current.includes(result.token!)) return prev;
-          return { ...prev, pushTokens: [...current, result.token!] };
-        });
+      if (result.ok && result.snapshot) {
+        setSettings((prev) => ({ ...prev, ...result.snapshot }));
+        setCurrentPush((prev) => ({ ...prev, deviceId: result.deviceId }));
         setPermission(typeof Notification !== "undefined" ? Notification.permission : "granted");
         toast.success("이 기기를 알림 대상으로 등록했어요");
       } else {
@@ -362,28 +470,74 @@ export default function GoralertSettingsPage() {
     }
   };
 
-  const handleUnregisterToken = async () => {
+  const refreshPushRegistrations = async () => {
     if (!user) return;
-    setUnregistering(true);
+    setCheckingCurrentPush(true);
     try {
-      const result = await unregisterPushToken(user.uid);
-      if (result.ok) {
-        // 등록 해제 성공 — 이 기기 토큰을 로컬 상태에서도 제거.
-        setSettings((prev) => {
-          if (!prev.pushTokens?.length) return prev;
-          const next = result.token
-            ? prev.pushTokens.filter((t) => t !== result.token)
-            : prev.pushTokens;
-          return { ...prev, pushTokens: next };
-        });
-        toast.success("이 기기 알림 등록을 해제했어요");
-      } else {
-        toast.error(result.error ?? "알림 등록 해제에 실패했습니다");
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "알림 등록 해제에 실패했습니다");
+      const [loaded, current] = await Promise.all([
+        loadAlertSettings(user.uid),
+        inspectCurrentPushRegistration(user.uid),
+      ]);
+      setCurrentPush(current);
+      setSettings({ ...loaded, ...(current.snapshot?.changed ? current.snapshot : {}) });
+      if (current.error) toast.error(current.error);
+    } catch {
+      toast.error("기기 목록 불러오기에 실패했습니다.");
     } finally {
-      setUnregistering(false);
+      setCheckingCurrentPush(false);
+    }
+  };
+
+  const handleRemoveSelectedDevices = async () => {
+    if (!user || removingDevices) return;
+    const selectedItems = Array.from(selectedDevices.values());
+    if (!selectedItems.length) return;
+    setRemovingDevices(true);
+    try {
+      const targets: PushRegistrationTarget[] = selectedItems.map((item) => ({
+        deviceId: item.deviceId,
+        token: item.token,
+      }));
+      const removingCurrent = selectedItems.some((item) => item.current);
+      const snapshot = await removePushRegistrations(user.uid, targets);
+      setSettings((prev) => ({ ...prev, ...snapshot }));
+      setSelectedDevices(new Map());
+      setRemoveConfirmOpen(false);
+      if (removingCurrent) {
+        const local = await deleteCurrentPushTokenLocally(user.uid);
+        setCurrentPush({});
+        if (!local.ok) {
+          toast.error("서버 등록은 해제했지만 현재 기기의 로컬 알림 정보 삭제에 실패했습니다.");
+          return;
+        }
+      }
+      toast.success(`${selectedItems.length}개 기기의 알림 등록을 해제했습니다.`);
+    } catch {
+      toast.error("선택한 기기 알림 등록 해제에 실패했습니다. 다시 시도해 주세요.");
+    } finally {
+      setRemovingDevices(false);
+    }
+  };
+
+  const handleResetPushRegistrations = async () => {
+    if (!user || resettingDevices) return;
+    setResettingDevices(true);
+    try {
+      const snapshot = await resetPushRegistrations(user.uid);
+      setSettings((prev) => ({ ...prev, ...snapshot }));
+      setSelectedDevices(new Map());
+      setResetConfirmOpen(false);
+      const local = await deleteCurrentPushTokenLocally(user.uid);
+      setCurrentPush({});
+      if (!local.ok) {
+        toast.error("서버의 기기 등록은 초기화했지만 현재 기기의 로컬 알림 정보 삭제에 실패했습니다.");
+        return;
+      }
+      toast.success("기기 알림 등록을 초기화했습니다. 알림을 받을 기기에서 다시 등록해 주세요.");
+    } catch {
+      toast.error("기기 알림 등록 초기화에 실패했습니다. 서버 등록 정보는 변경되지 않았습니다.");
+    } finally {
+      setResettingDevices(false);
     }
   };
 
@@ -491,7 +645,9 @@ export default function GoralertSettingsPage() {
   if (!user) return <NoUserState />;
   if (loading) return <LoadingState />;
 
-  const pushCount = settings.pushTokens?.length ?? 0;
+  const pushDeviceItems = buildPushDeviceList(settings, currentPush);
+  const pushCount = pushDeviceItems.length;
+  const currentDeviceRegistered = pushDeviceItems.some((item) => item.current);
   const permissionLabel =
     permission === "granted"
       ? "허용됨"
@@ -565,31 +721,120 @@ export default function GoralertSettingsPage() {
           <Badge tone={pushCount > 0 ? "success" : "neutral"}>{pushCount}대</Badge>
         </div>
         <div className="flex items-center justify-between">
+          <span className="text-sm text-foreground">현재 기기</span>
+          <Badge tone={currentDeviceRegistered ? "success" : "neutral"}>
+            {checkingCurrentPush ? "확인 중" : currentDeviceRegistered ? "등록됨" : "미등록"}
+          </Badge>
+        </div>
+        <div className="flex items-center justify-between">
           <span className="text-sm text-foreground">알림 권한</span>
           <Badge tone={permissionTone}>{permissionLabel}</Badge>
         </div>
         <Button
           variant="secondary"
           size="sm"
-          className="w-full"
+          className="min-h-11 w-full"
           onClick={() => void handleRegisterToken()}
-          disabled={registering || unregistering || pushSupported === false || permission === "denied"}
+          disabled={registering || removingDevices || resettingDevices || pushSupported === false || permission === "denied"}
         >
           {registering ? <Loader2 size={14} className="animate-spin" /> : <Smartphone size={14} />}
           이 기기 알림 등록
         </Button>
-        {pushCount > 0 ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="w-full"
-            onClick={() => void handleUnregisterToken()}
-            disabled={registering || unregistering || pushSupported === false}
-          >
-            {unregistering ? <Loader2 size={14} className="animate-spin" /> : <BellOff size={14} />}
-            이 기기 등록 해제
-          </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="min-h-11 w-full"
+          onClick={() => setDeviceManagerOpen((open) => !open)}
+          disabled={registering || removingDevices || resettingDevices}
+          aria-expanded={deviceManagerOpen}
+          aria-controls="push-device-manager"
+        >
+          <BellOff size={14} />
+          등록된 기기 알림 해제
+          {deviceManagerOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </Button>
+
+        {deviceManagerOpen ? (
+          <div id="push-device-manager" className="space-y-3 rounded-xl border border-border bg-background/60 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-medium text-foreground">등록 기기 관리</p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void refreshPushRegistrations()}
+                disabled={checkingCurrentPush || removingDevices || resettingDevices}
+              >
+                {checkingCurrentPush ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+                등록 상태 확인
+              </Button>
+            </div>
+            {pushDeviceItems.length ? (
+              <ul className="space-y-2">
+                {pushDeviceItems.map((item) => {
+                  const checked = selectedDevices.has(item.key);
+                  return (
+                    <li key={item.key} className="rounded-xl border border-border bg-card p-3">
+                      <label className="flex min-h-11 cursor-pointer items-start gap-3">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setSelectedDevices((previous) => {
+                              const next = new Map(previous);
+                              if (event.target.checked) next.set(item.key, item);
+                              else next.delete(item.key);
+                              return next;
+                            });
+                          }}
+                          className="mt-1 h-5 w-5 shrink-0 accent-accent"
+                          aria-label={`${item.label} 알림 등록 해제 선택`}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-1.5">
+                            <span className="break-words text-sm font-medium text-foreground">{item.label}</span>
+                            {item.current ? <Badge tone="success">현재 기기</Badge> : null}
+                          </span>
+                          <span className="mt-0.5 block text-xs text-muted-foreground">{item.detail}</span>
+                          <span className="mt-0.5 block text-[11px] text-muted-foreground">{item.timeLabel}</span>
+                        </span>
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : (
+              <p className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-sm text-muted-foreground">
+                등록된 알림 기기가 없습니다.
+              </p>
+            )}
+            <Button
+              variant="danger"
+              size="sm"
+              className="min-h-11 w-full"
+              onClick={() => setRemoveConfirmOpen(true)}
+              disabled={!selectedDevices.size || removingDevices || resettingDevices}
+            >
+              {removingDevices ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+              선택한 기기 알림 등록 해제
+            </Button>
+          </div>
         ) : null}
+
+        <div className="border-t border-border pt-3">
+          <Button
+            variant="danger"
+            size="sm"
+            className="min-h-11 w-full"
+            onClick={() => setResetConfirmOpen(true)}
+            disabled={registering || removingDevices || resettingDevices}
+          >
+            {resettingDevices ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} />}
+            기기 알림 등록 초기화
+          </Button>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            모든 기기의 Push 알림 등록을 삭제한 뒤 필요한 기기에서 다시 등록할 수 있습니다.
+          </p>
+        </div>
         {pushSupported === false ? (
           <p className="text-[11px] text-muted-foreground">
             이 브라우저에서는 푸시 알림을 사용할 수 없습니다.
@@ -603,7 +848,7 @@ export default function GoralertSettingsPage() {
           <div className="rounded-xl border border-dashed border-border p-3 text-[11px] text-muted-foreground">
             <div className="flex items-center justify-between gap-2">
               <span className="font-medium text-foreground">개발용 Push 진단</span>
-              <Button variant="ghost" size="sm" onClick={() => void refreshPushDiagnostics()} disabled={registering || unregistering}>
+              <Button variant="ghost" size="sm" onClick={() => void refreshPushDiagnostics()} disabled={registering || removingDevices || resettingDevices}>
                 진단 새로고침
               </Button>
             </div>
@@ -716,6 +961,28 @@ export default function GoralertSettingsPage() {
         <TestPushProgress phase={phase} />
         <TestChannelResults results={testResults} />
       </SectionCard>
+
+      <ConfirmDialog
+        open={removeConfirmOpen}
+        title="기기 알림 등록 해제"
+        description={`선택한 ${selectedDevices.size}개 기기의 알림 등록을 해제할까요?`}
+        confirmLabel="알림 등록 해제"
+        cancelLabel="취소"
+        busy={removingDevices}
+        onConfirm={() => void handleRemoveSelectedDevices()}
+        onCancel={() => setRemoveConfirmOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="기기 알림 등록 초기화"
+        description="모든 기기의 Push 알림 등록을 삭제합니다. 이후 알림을 받을 기기에서 다시 등록해야 합니다."
+        confirmLabel="전체 초기화"
+        cancelLabel="취소"
+        busy={resettingDevices}
+        onConfirm={() => void handleResetPushRegistrations()}
+        onCancel={() => setResetConfirmOpen(false)}
+      />
     </div>
   );
 }
