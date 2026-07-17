@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import load_config, load_service_account_dict
 from .models import AlertRule, AlertSettings, NotificationLog
@@ -326,6 +326,25 @@ def write_notification_log(uid: str, log: NotificationLog) -> None:
     )
 
 
+def _remove_invalid_push_data(data: Dict[str, Any], invalid: set) -> Tuple[List[str], List[Dict[str, Any]], int]:
+    """Pure normalization used by the transaction and offline regression tests."""
+    current_tokens = data.get("pushTokens") if isinstance(data.get("pushTokens"), list) else []
+    current_tokens = [token for token in current_tokens if isinstance(token, str) and token]
+    current_devices = data.get("pushDevices") if isinstance(data.get("pushDevices"), list) else []
+    current_devices = [device for device in current_devices if isinstance(device, dict)]
+    before = {
+        *current_tokens,
+        *(device.get("token") for device in current_devices if isinstance(device.get("token"), str)),
+    }
+    next_tokens = [token for token in current_tokens if token not in invalid]
+    next_devices = [device for device in current_devices if device.get("token") not in invalid]
+    after = {
+        *next_tokens,
+        *(device.get("token") for device in next_devices if isinstance(device.get("token"), str)),
+    }
+    return next_tokens, next_devices, len(before - after)
+
+
 def remove_invalid_push_tokens(uid: str, invalid_tokens: List[str]) -> int:
     """Atomically remove only FCM-confirmed invalid tokens for one user.
 
@@ -347,11 +366,13 @@ def remove_invalid_push_tokens(uid: str, invalid_tokens: List[str]) -> int:
     def remove_in_transaction(transaction):
         snap = ref.get(transaction=transaction)
         data = snap.to_dict() or {}
-        current = data.get("pushTokens") if isinstance(data.get("pushTokens"), list) else []
-        next_tokens = [token for token in current if token not in invalid]
-        removed = len(current) - len(next_tokens)
+        next_tokens, next_devices, removed = _remove_invalid_push_data(data, invalid)
         if removed:
-            transaction.update(ref, {"pushTokens": next_tokens, "updatedAt": firestore.SERVER_TIMESTAMP})
+            transaction.update(ref, {
+                "pushTokens": next_tokens,
+                "pushDevices": next_devices,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
         return removed
 
     return int(remove_in_transaction(transaction))

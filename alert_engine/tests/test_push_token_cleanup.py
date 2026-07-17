@@ -1,11 +1,15 @@
 from alert_engine.engine import AlertEngine
-from alert_engine.models import AlertSettings
+from alert_engine.models import AlertSettings, PushDevice
 
 from .conftest import FakeChannel, FakeDataSource, FakeFirestore, make_ratio_rule
 
 
 def test_fcm_confirmed_invalid_token_is_removed_without_touching_other_devices():
-    firestore = FakeFirestore(settings=AlertSettings(globalEnabled=True, pushTokens=["invalid", "valid"]))
+    firestore = FakeFirestore(settings=AlertSettings(
+        globalEnabled=True,
+        pushTokens=["invalid", "valid"],
+        pushDevices=[PushDevice(id="invalid-device", token="invalid"), PushDevice(id="valid-device", token="valid")],
+    ))
     engine = AlertEngine(
         firestore=firestore,
         datasource=FakeDataSource(),
@@ -17,3 +21,4 @@ def test_fcm_confirmed_invalid_token_is_removed_without_touching_other_devices()
 
     assert firestore.removed_push_tokens == ["invalid"]
     assert firestore._settings.pushTokens == ["valid"]
+    assert [device.id for device in firestore._settings.pushDevices] == ["valid-device"]

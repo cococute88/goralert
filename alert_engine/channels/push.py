@@ -1,7 +1,8 @@
 """Push delivery channel (FCM via firebase-admin messaging).
 
 Uses the SAME firebase-admin app/credential as Firestore (no separate FCM key).
-Delivers to every token in ``alertSettings.pushTokens`` with a SINGLE batched
+Delivers to every unique token in ``alertSettings.pushDevices`` plus legacy
+``pushTokens`` with a SINGLE batched
 ``messaging.send_each_for_multicast`` call (the Python equivalent of the Admin
 SDK's ``sendEachForMulticast``), then logs the **full** ``BatchResponse`` —
 ``success_count`` / ``failure_count`` and, per token, either the returned
@@ -18,7 +19,7 @@ results are aggregated: "sent" when at least one token succeeds, else "failed".
 
 NOTE: client push tokens are registered by the web app's real browser FCM client
 (``lib/alerts/fcm-client.ts::registerPushToken``) and persisted to
-``alertSettings.pushTokens``; this channel delivers to those tokens. The web
+``alertSettings.pushDevices``/``pushTokens``; this channel delivers to those tokens. The web
 app's test button enqueues a request and this is the shared production path
 that actually round-trips through FCM.
 """
@@ -81,13 +82,13 @@ class PushChannel:
     name = "push"
 
     def send(self, message: MessageTemplate, settings: AlertSettings, **kwargs: Any) -> ChannelSendResult:
-        tokens: List[str] = list(settings.pushTokens) if settings and settings.pushTokens else []
+        tokens: List[str] = settings.delivery_tokens() if settings else []
         logger.info("[push] send start :: tokens=%d title=%r", len(tokens), message.title)
         if not tokens:
-            logger.warning("[push] no pushTokens in alertSettings — nothing to deliver")
+            logger.warning("[push] no registered devices in alertSettings — nothing to deliver")
             return ChannelSendResult(
                 self.name, "failed",
-                error="no pushTokens in alertSettings (register via web app)",
+                error="no registered push devices in alertSettings (register via web app)",
             )
 
         # Ensure firebase-admin is initialized (shares the Firestore credential).

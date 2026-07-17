@@ -160,8 +160,10 @@ class FakeFirestore:
         return self._settings
 
     def remove_invalid_push_tokens(self, uid: str, tokens: List[str]) -> int:
-        removed = [token for token in self._settings.pushTokens if token in tokens]
+        effective_before = set(self._settings.delivery_tokens())
         self._settings.pushTokens = [token for token in self._settings.pushTokens if token not in tokens]
+        self._settings.pushDevices = [device for device in self._settings.pushDevices if device.token not in tokens]
+        removed = sorted(effective_before - set(self._settings.delivery_tokens()))
         self.removed_push_tokens.extend(removed)
         return len(removed)
 
