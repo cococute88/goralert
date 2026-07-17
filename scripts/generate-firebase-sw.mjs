@@ -52,6 +52,16 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID ?? "",
 };
 
+const requiredConfigKeys = ["apiKey", "projectId", "messagingSenderId", "appId"];
+const missingConfigKeys = requiredConfigKeys.filter((key) => !firebaseConfig[key]);
+if (missingConfigKeys.length) {
+  const message = `Firebase Messaging service worker is not generated with usable config; missing ${missingConfigKeys.join(", ")}.`;
+  if (process.env.VERCEL_ENV === "production") {
+    throw new Error(message);
+  }
+  console.warn(`[generate-firebase-sw] WARNING: ${message}`);
+}
+
 const configLiteral = JSON.stringify(firebaseConfig, null, 2);
 
 const serviceWorker = `/* eslint-disable */
@@ -68,14 +78,19 @@ importScripts("https://www.gstatic.com/firebasejs/11.0.2/firebase-messaging-comp
 
 var firebaseConfig = ${configLiteral};
 
-// config 가 채워진 경우에만 초기화 (빈 값이면 조용히 비활성화).
-if (firebaseConfig.projectId && firebaseConfig.messagingSenderId) {
+// Do not initialize a worker with partial config: it can look registered while
+// FCM token issuance/background delivery is impossible.
+if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.messagingSenderId && firebaseConfig.appId) {
   firebase.initializeApp(firebaseConfig);
 
   var messaging = firebase.messaging();
 
   // 백그라운드(탭 비활성/종료) 수신 메시지 → 시스템 알림 표시.
   messaging.onBackgroundMessage(function (payload) {
+    // PushChannel sends data-only messages. Legacy notification payloads are
+    // displayed by the browser/FCM automatically, so rendering them again here
+    // would create duplicate system notifications.
+    if (payload && payload.notification) return;
     var notification = (payload && payload.notification) || {};
     var data = (payload && payload.data) || {};
     var title = notification.title || data.title || "고라알림";
@@ -87,6 +102,8 @@ if (firebaseConfig.projectId && firebaseConfig.messagingSenderId) {
     };
     self.registration.showNotification(title, options);
   });
+} else {
+  console.error("[push] Firebase Messaging worker disabled: required public Firebase config is missing.");
 }
 
 // 알림 클릭 시 앱(고라알림)으로 포커스/이동.
@@ -114,7 +131,7 @@ self.addEventListener("notificationclick", function (event) {
 const outPath = resolve(ROOT, "public", "firebase-messaging-sw.js");
 writeFileSync(outPath, serviceWorker, "utf8");
 
-const filled = Boolean(firebaseConfig.projectId && firebaseConfig.messagingSenderId);
+const filled = missingConfigKeys.length === 0;
 console.log(
   `[generate-firebase-sw] wrote ${outPath} (config ${filled ? "filled from env" : "EMPTY — NEXT_PUBLIC_FIREBASE_* not set"})`,
 );

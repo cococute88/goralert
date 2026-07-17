@@ -5,6 +5,12 @@
 // 발송한다. condition.kind === "date" + selector, trigger.recurrence.kind === "calendar".
 
 import type { CalendarMark, DateCondition, DateEventSelector } from "@/lib/alerts/types";
+import {
+  CALENDAR_EVENT_TYPE_OPTIONS,
+  isKnownCalendarEventType,
+  normalizeCalendarEventTypes,
+} from "@/lib/alerts/calendar-event-types";
+import type { CalendarEventType } from "@/lib/calendar-types";
 import { Field, Select, TimeInput, TextInput, SEOUL_TZ, type RuleFormProps } from "./fields";
 
 const SOURCE_OPTIONS: { value: DateEventSelector["source"]; label: string }[] = [
@@ -24,6 +30,11 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
   const selector = condition.selector ?? { source: "calendarEvents" };
   const marks = selector.markFilter ?? [];
   const recurrence = value.trigger?.recurrence;
+  const storedEventTypes = normalizeCalendarEventTypes(selector.match?.type);
+  const selectedEventTypes = storedEventTypes.filter(isKnownCalendarEventType);
+  // Preserve a value an older rule stored but the current UI does not know. It
+  // remains visible and is not removed merely because another field is edited.
+  const unknownEventTypes = storedEventTypes.filter((eventType) => !isKnownCalendarEventType(eventType));
 
   const updateSelector = (patch: Partial<DateEventSelector>) => {
     onChange({
@@ -38,7 +49,22 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
   };
 
   const updateMatch = (patch: Partial<NonNullable<DateEventSelector["match"]>>) => {
-    updateSelector({ match: { ...selector.match, ...patch } });
+    const next = { ...selector.match, ...patch };
+    if (typeof next.titleContains === "string") {
+      const trimmed = next.titleContains.trim();
+      if (trimmed) next.titleContains = trimmed;
+      else delete next.titleContains;
+    }
+    if (Array.isArray(next.type) && next.type.length === 0) delete next.type;
+    updateSelector({ match: Object.keys(next).length ? next : undefined });
+  };
+
+  const toggleEventType = (eventType: CalendarEventType) => {
+    const next = selectedEventTypes.includes(eventType)
+      ? selectedEventTypes.filter((item) => item !== eventType)
+      : [...selectedEventTypes, eventType];
+    const preserved = [...next, ...unknownEventTypes];
+    updateMatch({ type: preserved.length ? preserved : undefined });
   };
 
   const toggleMark = (mark: CalendarMark) => {
@@ -79,6 +105,7 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
                 key={mark}
                 type="button"
                 onClick={() => toggleMark(mark)}
+                aria-pressed={active}
                 className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
                   active ? "border-accent bg-accent/10 text-foreground" : "border-border bg-background text-muted-foreground"
                 }`}
@@ -90,22 +117,45 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
         </div>
       </Field>
 
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="이벤트 종류" hint="예: ex-dividend, buy-deadline">
-          <TextInput
-            value={selector.match?.type ?? ""}
-            placeholder="비우면 전체"
-            onChange={(e) => updateMatch({ type: e.target.value || undefined })}
-          />
-        </Field>
-        <Field label="제목 포함">
-          <TextInput
-            value={selector.match?.titleContains ?? ""}
-            placeholder="비우면 전체"
-            onChange={(e) => updateMatch({ titleContains: e.target.value || undefined })}
-          />
-        </Field>
-      </div>
+      <Field label="이벤트 종류" hint="복수 선택할 수 있습니다. 선택하지 않으면 모든 일정 종류가 대상입니다.">
+        <div className="flex flex-wrap gap-2">
+          {CALENDAR_EVENT_TYPE_OPTIONS.map((option) => {
+            const checked = selectedEventTypes.includes(option.value);
+            return (
+              <label
+                key={option.value}
+                className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border px-3 py-2 text-sm transition-colors ${
+                  checked ? "border-accent bg-accent/10 text-foreground" : "border-border bg-background text-muted-foreground"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => toggleEventType(option.value)}
+                  className="size-4 accent-accent"
+                />
+                {option.label}
+              </label>
+            );
+          })}
+          {unknownEventTypes.map((eventType) => (
+            <span key={eventType} className="flex min-h-11 items-center rounded-xl border border-warning/50 bg-warning/10 px-3 py-2 text-sm text-foreground">
+              기존 종류: {eventType}
+            </span>
+          ))}
+        </div>
+      </Field>
+
+      <Field
+        label="포함 단어"
+        hint="입력한 단어가 일정 제목에 포함된 경우만 알림을 보냅니다. 비워두면 모든 일정이 대상입니다. 대소문자를 구분하지 않습니다."
+      >
+        <TextInput
+          value={selector.match?.titleContains ?? ""}
+          placeholder="비워두면 전체"
+          onChange={(e) => updateMatch({ titleContains: e.target.value })}
+        />
+      </Field>
 
       <Field label="알림 시각">
         <TimeInput value={recurrence?.time ?? "18:00"} onChange={(e) => updateTime(e.target.value)} />

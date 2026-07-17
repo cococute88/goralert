@@ -8,7 +8,8 @@
     "generate:sw": "node scripts/generate-firebase-sw.mjs",
     "start": "next start",
     "lint": "next lint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:firestore-payload": "node --test tests/firestore-payload.test.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.0",

@@ -79,7 +79,10 @@ export default function RuleForm({
       toast.success("알림을 저장했습니다");
       onSaved();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "저장에 실패했습니다");
+      // Keep the draft in place and avoid exposing Firestore paths or a UID in
+      // user-facing UI. The browser console keeps a safe diagnostic breadcrumb.
+      console.error("[alerts] rule save failed", { error: err instanceof Error ? err.name : "unknown" });
+      toast.error("알림 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setSaving(false);
     }

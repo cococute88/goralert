@@ -272,12 +272,23 @@ class AlertDataSource:
         if ticker and str(event.get("ticker", "")).upper() != str(ticker).upper():
             return False
         ev_type = match.get("type")
-        if ev_type and str(event.get("type", "")) != str(ev_type):
-            return False
+        if ev_type:
+            raw_types = ev_type if isinstance(ev_type, list) else [ev_type]
+            # Old UI hints stored these two values even though the calendar's
+            # actual persisted codes are ex_div/buy_by. Keep existing rules
+            # functional while new rules write the canonical codes.
+            aliases = {"ex-dividend": "ex_div", "buy-deadline": "buy_by"}
+            accepted_types = {
+                aliases.get(str(item).strip(), str(item).strip())
+                for item in raw_types
+                if str(item).strip()
+            }
+            if accepted_types and str(event.get("type", "")) not in accepted_types:
+                return False
         contains = match.get("titleContains")
-        if contains:
-            title = str(event.get("title", "")).lower()
-            if str(contains).lower() not in title:
+        if isinstance(contains, str) and contains.strip():
+            title = str(event.get("title", "")).casefold()
+            if contains.strip().casefold() not in title:
                 return False
         return True
 

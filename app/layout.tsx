@@ -5,6 +5,7 @@ import AuthGate from "@/components/auth/AuthGate";
 import BottomNav from "@/components/alerts/BottomNav";
 import { ToastProvider } from "@/components/alerts/ui/toast";
 import PushServiceWorker from "@/components/alerts/PushServiceWorker";
+import PushForegroundMessages from "@/components/alerts/PushForegroundMessages";
 import { Bell } from "lucide-react";
 
 const APP_NAME = "고라알림";
@@ -60,6 +61,7 @@ export default function RootLayout({
           <PushServiceWorker />
           <AuthGate>
             <ToastProvider>
+              <PushForegroundMessages />
               <div className="min-h-screen bg-background text-foreground">
                 <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
                   <div className="mx-auto flex max-w-md items-center gap-2 px-4 py-3">

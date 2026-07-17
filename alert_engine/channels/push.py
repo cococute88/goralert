@@ -19,9 +19,8 @@ results are aggregated: "sent" when at least one token succeeds, else "failed".
 NOTE: client push tokens are registered by the web app's real browser FCM client
 (``lib/alerts/fcm-client.ts::registerPushToken``) and persisted to
 ``alertSettings.pushTokens``; this channel delivers to those tokens. The web
-app's "테스트 Push" button (``sendTestPush``) only shows a LOCAL browser
-notification and never reaches this server path — this is the only code that
-actually round-trips through FCM.
+app's test button enqueues a request and this is the shared production path
+that actually round-trips through FCM.
 """
 
 from __future__ import annotations
@@ -65,6 +64,19 @@ def _fcm_detail(exc: BaseException) -> str:
     return " ".join(parts)
 
 
+def _is_confirmed_unregistered(exc: Optional[BaseException]) -> bool:
+    """True only when FCM confirms that this registration token is gone.
+
+    INVALID_ARGUMENT can describe a malformed request, and SENDER_ID_MISMATCH
+    can expose a project/configuration failure. Neither is safe evidence for
+    deleting a user token. The Admin SDK's UnregisteredError (or canonical
+    UNREGISTERED code) is the narrow, permanent-token signal.
+    """
+    if exc is None:
+        return False
+    return type(exc).__name__ == "UnregisteredError" or _fcm_error_code(exc).upper() == "UNREGISTERED"
+
+
 class PushChannel:
     name = "push"
 
@@ -89,8 +101,12 @@ class PushChannel:
             logger.error("[push] FCM not configured: %s", _fcm_detail(exc))
             return ChannelSendResult(self.name, "failed", error=f"FCM not configured: {exc}")
 
+        # Data-only is intentional. The generated service worker renders it via
+        # onBackgroundMessage; adding a notification payload would let FCM/the
+        # browser render one automatically and can duplicate the notification.
         multicast = messaging.MulticastMessage(
-            notification=messaging.Notification(title=message.title, body=message.body),
+            data={"title": message.title, "body": message.body, "url": "/"},
+            webpush=messaging.WebpushConfig(headers={"Urgency": "high"}),
             tokens=tokens,
         )
 
@@ -129,11 +145,7 @@ class PushChannel:
             logger.error("[push]   token=%s -> FAILED code=%s detail=%s", short, code, detail)
             errors.append(f"{short}: {detail}")
 
-            # Dead/invalid tokens -> mark for cleanup. UnregisteredError and
-            # invalid-argument/sender-mismatch mean the token will never work.
-            name = type(exc).__name__ if exc is not None else ""
-            if any(k in name for k in ("Unregistered", "InvalidArgument", "SenderIdMismatch", "NotFound")) or \
-               any(k in code.upper() for k in ("UNREGISTERED", "INVALID_ARGUMENT", "SENDER_ID_MISMATCH", "NOT_FOUND")):
+            if _is_confirmed_unregistered(exc):
                 invalid.append(token)
 
         if batch.success_count > 0:

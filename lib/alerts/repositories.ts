@@ -19,16 +19,14 @@ import {
   updateDoc,
   where,
   type DocumentData,
+  type UpdateData,
   type QueryConstraint,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import { firestoreDb } from "@/lib/firebase/client";
+import { sanitizeFirestorePayload } from "./firestore-payload.mjs";
 
-function sanitizeFirestorePayload(data: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(data).filter(([, v]) => v !== undefined)
-  );
-}
+export { sanitizeFirestorePayload } from "./firestore-payload.mjs";
 import {
   alertRuleDoc,
   alertRulesCol,
@@ -94,10 +92,10 @@ export async function deleteAlertRule(uid: string, id: string): Promise<void> {
 }
 
 export async function setAlertRuleEnabled(uid: string, id: string, enabled: boolean): Promise<void> {
-  await updateDoc(alertRuleDoc(requireDb(), uid, id), {
+  await updateDoc(alertRuleDoc(requireDb(), uid, id), sanitizeFirestorePayload({
     enabled,
     updatedAt: serverTimestamp(),
-  });
+  }) as UpdateData<DocumentData>);
 }
 
 // --- NotificationLog ---------------------------------------------------------

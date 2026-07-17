@@ -148,6 +148,7 @@ class FakeFirestore:
     def __init__(self, settings: Optional[AlertSettings] = None, calendar_store: Optional[FakeCalendarStore] = None):
         self.logs: Dict[str, Any] = {}
         self.state_updates: List[Dict[str, Any]] = []
+        self.removed_push_tokens: List[str] = []
         self.calendar_writes = 0
         self._settings = settings or AlertSettings(
             globalEnabled=True, telegramChatId="chat-123", pushTokens=["tok-1"]
@@ -157,6 +158,12 @@ class FakeFirestore:
     # settings / idempotency / writes -----------------------------------------
     def load_alert_settings(self, uid: str) -> AlertSettings:
         return self._settings
+
+    def remove_invalid_push_tokens(self, uid: str, tokens: List[str]) -> int:
+        removed = [token for token in self._settings.pushTokens if token in tokens]
+        self._settings.pushTokens = [token for token in self._settings.pushTokens if token not in tokens]
+        self.removed_push_tokens.extend(removed)
+        return len(removed)
 
     def log_exists(self, uid: str, event_id: str) -> bool:
         return event_id in self.logs

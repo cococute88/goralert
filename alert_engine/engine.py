@@ -280,8 +280,7 @@ class AlertEngine:
         except Exception as exc:  # noqa: BLE001
             logger.warning("update_rule_state failed rule=%s (%s)", rule.id, exc)
 
-        if outcome.invalid_push_tokens:
-            logger.warning("rule=%s invalid push tokens: %s", rule.id, outcome.invalid_push_tokens)
+        self._cleanup_invalid_push_tokens(rule.uid, rule.id, outcome.invalid_push_tokens)
 
         return ProcessResult(rule.id, rule.uid, STATUS_DELIVERED, eval_result.detail, eval_result.value, event_id, log)
 
@@ -338,6 +337,7 @@ class AlertEngine:
                 settings=settings,
             )
             results = outcome.results
+            self._cleanup_invalid_push_tokens(uid, rule.id, outcome.invalid_push_tokens)
 
         any_sent = any(r.status == "sent" for r in results)
         log = NotificationLog(
@@ -363,6 +363,21 @@ class AlertEngine:
         return log
 
     # --- helpers -------------------------------------------------------------
+
+    def _cleanup_invalid_push_tokens(self, uid: str, rule_id: str, tokens: List[str]) -> None:
+        if not tokens:
+            return
+        masked = [f"{token[:12]}…" for token in tokens]
+        logger.warning("rule=%s FCM marked invalid tokens count=%d tokens=%s", rule_id, len(tokens), masked)
+        cleanup = getattr(self.firestore, "remove_invalid_push_tokens", None)
+        if not callable(cleanup):
+            logger.info("rule=%s invalid tokens recorded; Firestore cleanup is unavailable in this runtime", rule_id)
+            return
+        try:
+            removed = cleanup(uid, tokens)
+            logger.info("rule=%s removed %d FCM-confirmed invalid push token(s)", rule_id, removed)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("rule=%s could not remove invalid push tokens (%s)", rule_id, exc)
 
     @staticmethod
     def _needs_prev_value(condition) -> bool:
