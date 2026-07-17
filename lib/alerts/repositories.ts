@@ -13,6 +13,7 @@ import {
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   setDoc,
   startAfter,
@@ -25,6 +26,13 @@ import {
 } from "firebase/firestore";
 import { firestoreDb } from "@/lib/firebase/client";
 import { sanitizeFirestorePayload } from "./firestore-payload.mjs";
+import {
+  normalizePushDevices,
+  normalizePushTokens,
+  removePushRegistrationsData,
+  resetPushRegistrationData,
+  upsertPushDeviceData,
+} from "./push-device-data.mjs";
 
 export { sanitizeFirestorePayload } from "./firestore-payload.mjs";
 import {
@@ -48,6 +56,7 @@ import type {
   DeliveryChannel,
   MessageTemplate,
   NotificationLog,
+  PushDevice,
 } from "./types";
 
 const DEFAULT_LOG_WINDOW = 200;
@@ -244,7 +253,13 @@ export async function deleteAlertTemplate(uid: string, id: string): Promise<void
 export async function loadAlertSettings(uid: string): Promise<AlertSettings> {
   if (!firestoreDb) return defaultAlertSettings();
   const snap = await getDoc(alertSettingsDoc(firestoreDb, uid));
-  return snap.exists() ? (snap.data() as unknown as AlertSettings) : defaultAlertSettings();
+  if (!snap.exists()) return defaultAlertSettings();
+  const data = snap.data() as unknown as AlertSettings;
+  return {
+    ...data,
+    pushTokens: normalizePushTokens(data.pushTokens),
+    pushDevices: normalizePushDevices(data.pushDevices) as PushDevice[],
+  };
 }
 
 export async function saveAlertSettings(uid: string, partial: Partial<AlertSettings>): Promise<void> {
@@ -253,6 +268,81 @@ export async function saveAlertSettings(uid: string, partial: Partial<AlertSetti
     updatedAt: serverTimestamp(),
   });
   await setDoc(alertSettingsDoc(requireDb(), uid), payload, { merge: true });
+}
+
+export type PushRegistrationTarget = {
+  deviceId?: string;
+  // Used only for an exact legacy/current-token match. Never render or log it.
+  token?: string;
+};
+
+export type PushRegistrationSnapshot = {
+  pushTokens: string[];
+  pushDevices: PushDevice[];
+  removedCount?: number;
+  changed?: boolean;
+};
+
+// Keep the legacy token array and the metadata list consistent in one retrying
+// transaction. Firestore retries the callback when another browser changes the
+// settings document concurrently, so a newly registered token is not lost.
+export async function upsertPushDevice(
+  uid: string,
+  device: PushDevice,
+  options: { requireExistingDeviceId?: boolean } = {},
+): Promise<PushRegistrationSnapshot> {
+  const db = requireDb();
+  const ref = alertSettingsDoc(db, uid);
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const current = snap.exists() ? snap.data() : {};
+    const next = upsertPushDeviceData(current, device, new Date().toISOString(), options);
+    if (next.changed) {
+      transaction.set(ref, {
+        pushTokens: next.pushTokens,
+        pushDevices: next.pushDevices,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+    }
+    return next as PushRegistrationSnapshot;
+  });
+}
+
+export async function removePushRegistrations(
+  uid: string,
+  targets: PushRegistrationTarget[],
+): Promise<PushRegistrationSnapshot> {
+  const db = requireDb();
+  const ref = alertSettingsDoc(db, uid);
+  return runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(ref);
+    const current = snap.exists() ? snap.data() : {};
+    const next = removePushRegistrationsData(current, targets);
+    // Writing an already-empty result is intentional: repeated requests stay
+    // idempotent and never fall back to deleting an unrelated array element.
+    transaction.set(ref, {
+      pushTokens: next.pushTokens,
+      pushDevices: next.pushDevices,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return next as PushRegistrationSnapshot;
+  });
+}
+
+export async function resetPushRegistrations(uid: string): Promise<PushRegistrationSnapshot> {
+  const db = requireDb();
+  const ref = alertSettingsDoc(db, uid);
+  return runTransaction(db, async (transaction) => {
+    // The read makes this conflict with concurrent device registration. A retry
+    // then clears the latest arrays instead of overwriting from stale state.
+    await transaction.get(ref);
+    const next = resetPushRegistrationData();
+    transaction.set(ref, {
+      ...next,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return next as PushRegistrationSnapshot;
+  });
 }
 
 // --- CalendarAlertMark -------------------------------------------------------

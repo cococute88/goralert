@@ -210,10 +210,31 @@ export type NotificationLog = {
   createdAt?: unknown;
 };
 
+export type PushDevicePlatform = "android" | "windows" | "macos" | "ios" | "linux" | "unknown";
+export type PushDeviceBrowser = "chrome" | "samsung-internet" | "edge" | "safari" | "firefox" | "unknown";
+export type PushDeviceType = "mobile" | "tablet" | "desktop" | "unknown";
+
+// Normalized browser-provided metadata only. A browser cannot reliably expose
+// the physical phone/computer model, so no hardware-model or full User-Agent
+// field is persisted. `id` is an app-generated registration id kept locally by
+// the registering browser; the FCM token is never used as the UI identity.
+export type PushDevice = {
+  id: string;
+  token: string;
+  label: string;
+  platform: PushDevicePlatform;
+  browser: PushDeviceBrowser;
+  deviceType: PushDeviceType;
+  registeredAt: string;
+  lastSeenAt: string;
+  tokenUpdatedAt: string;
+};
+
 export type AlertSettings = {
   globalEnabled: boolean;
   telegramChatId?: string;
   pushTokens?: string[];
+  pushDevices?: PushDevice[];
   defaultQuietHours?: QuietHours;
   defaultAlertTime?: string; // HH:mm
   defaultMessageTitle?: string;
