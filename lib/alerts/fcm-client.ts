@@ -49,6 +49,7 @@ export type CurrentPushRegistration = {
   deviceId?: string;
   token?: string;
   snapshot?: PushRegistrationSnapshot;
+  error?: string;
 };
 
 export type PushDiagnostics = {
@@ -333,9 +334,24 @@ export async function registerPushToken(uid: string): Promise<RegisterPushResult
       return { ok: false, error: "푸시 토큰을 발급받지 못했습니다. 잠시 후 다시 시도해 주세요." };
     }
     console.log("[push] getToken success");
-    const device = buildPushDevice(uid, token);
-    const snapshot = await upsertPushDevice(uid, device);
-    return { ok: true, deviceId: device.id, snapshot };
+    let device: PushDevice;
+    try {
+      device = buildPushDevice(uid, token);
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : "현재 기기 정보 확인에 실패했습니다.",
+      };
+    }
+    try {
+      const snapshot = await upsertPushDevice(uid, device);
+      return { ok: true, deviceId: device.id, snapshot };
+    } catch {
+      return {
+        ok: false,
+        error: "알림 기기 정보를 서버에 저장하지 못했습니다. 네트워크 상태를 확인해 주세요.",
+      };
+    }
   } catch (err) {
     console.error("[push] getToken failed", err);
     return {
@@ -410,13 +426,13 @@ export async function inspectCurrentPushRegistration(
   try {
     const registration = await registerServiceWorker();
     const token = await getToken(messaging, { vapidKey, serviceWorkerRegistration: registration });
-    if (!token) return { deviceId };
+    if (!token) return { deviceId, error: "현재 기기 정보 확인에 실패했습니다." };
     if (!confirmExisting || !deviceId) return { deviceId, token };
     const device = buildPushDevice(uid, token);
     const snapshot = await upsertPushDevice(uid, device, { requireExistingDeviceId: true });
     return { deviceId, token, snapshot };
   } catch {
-    return { deviceId };
+    return { deviceId, error: "현재 기기 정보 확인에 실패했습니다." };
   }
 }
 

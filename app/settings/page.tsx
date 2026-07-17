@@ -393,6 +393,7 @@ export default function GoralertSettingsPage() {
         const current = await inspectCurrentPushRegistration(user.uid);
         if (!active) return;
         setCurrentPush(current);
+        if (current.error) toast.error(current.error);
         if (current.snapshot?.changed) {
           setSettings((previous) => ({ ...previous, ...current.snapshot }));
         }
@@ -479,6 +480,7 @@ export default function GoralertSettingsPage() {
       ]);
       setCurrentPush(current);
       setSettings({ ...loaded, ...(current.snapshot?.changed ? current.snapshot : {}) });
+      if (current.error) toast.error(current.error);
     } catch {
       toast.error("기기 목록 불러오기에 실패했습니다.");
     } finally {
