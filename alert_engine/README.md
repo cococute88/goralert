@@ -199,8 +199,10 @@ The engine + tests are complete; only real secrets/data are outstanding:
 - [ ] **`TELEGRAM_BOT_TOKEN`** — add as a GitHub Actions secret to enable
       Telegram delivery. Each user's `telegramChatId` is set via the web app
       (`alertSettings`).
-- [ ] **Push tokens** — real FCM client registration in the PWA writes
-      `alertSettings.pushTokens`; until then push fails gracefully.
+- [ ] **Push devices** — real FCM client registration in the PWA writes
+      `alertSettings.pushDevices` and the compatible `pushTokens` array. The
+      engine merges both sources and de-duplicates tokens; until registration
+      succeeds, push fails gracefully.
 - [ ] **Firestore index** — composite/`collection_group` query on `alertRules`
       `enabled == true` (already declared in `firestore.indexes.json`; deploy it
       with `firebase deploy --only firestore:indexes`).

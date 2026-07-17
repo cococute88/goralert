@@ -36,7 +36,9 @@ Preview 환경은 production 배포를 막지 않기 위해 필수 public Fireba
 ## 결과 해석
 
 - Telegram 성공 + Push 실패는 PushChannel의 채널별 FCM 결과를 우선 봅니다. Telegram 성공은 Push 성공 증거가 아닙니다.
-- `no pushTokens`는 현재 브라우저에서 FCM token 등록 또는 Firestore 저장 전 단계 실패입니다.
-- `UNREGISTERED`/`INVALID_ARGUMENT`/`SENDER_ID_MISMATCH`는 FCM이 확인한 무효 token만 정리합니다.
+- `no registered push devices`는 현재 브라우저에서 FCM token 등록 또는 Firestore 저장 전 단계 실패입니다.
+- `UNREGISTERED`로 영구 무효가 확인된 token만 `pushTokens`와 `pushDevices`에서 함께 정리합니다. `INVALID_ARGUMENT`/`SENDER_ID_MISMATCH`는 자동 삭제 근거로 사용하지 않습니다.
 - `THIRD_PARTY_AUTH_ERROR`, 인증 오류, 프로젝트 불일치는 VAPID·service account·Firebase 프로젝트 구성을 확인합니다.
 - Dispatch 실패는 규칙 저장 실패가 아닙니다. 현재 workflow의 5분 schedule은 큐에 남은 요청의 fallback입니다.
+
+기기 목록·개별 삭제·전체 초기화의 데이터 구조와 운영 절차는 [Push 등록 기기 관리 운영 가이드](./push-device-management.md)를 참고합니다.
