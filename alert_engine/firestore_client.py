@@ -20,6 +20,7 @@ Collections (mirroring ``lib/alerts/collections.ts`` + calendar repos):
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from .config import load_config, load_service_account_dict
@@ -55,8 +56,17 @@ def _init_firebase():
 
     sa_dict = load_service_account_dict()
     if sa_dict is not None:
+        expected_project_id = os.getenv("FIREBASE_PROJECT_ID", "").strip()
+        credential_project_id = str(sa_dict.get("project_id") or "").strip()
+        if expected_project_id and credential_project_id and expected_project_id != credential_project_id:
+            raise RuntimeError(
+                "Firebase service account project does not match FIREBASE_PROJECT_ID. "
+                "Use credentials from the same Firebase project as the web app."
+            )
         cred = credentials.Certificate(sa_dict)
-        return firebase_admin.initialize_app(cred)
+        app = firebase_admin.initialize_app(cred)
+        logger.info("Firebase Admin initialized for project=%s", credential_project_id or "<unknown>")
+        return app
 
     cfg = load_config()
     if cfg.google_application_credentials:
@@ -314,6 +324,37 @@ def write_notification_log(uid: str, log: NotificationLog) -> None:
         .collection(NOTIFICATION_LOGS).document(log.id)
         .set(payload)
     )
+
+
+def remove_invalid_push_tokens(uid: str, invalid_tokens: List[str]) -> int:
+    """Atomically remove only FCM-confirmed invalid tokens for one user.
+
+    A failed token lookup on a browser is never enough to remove a token. This
+    function is called only after PushChannel received an UNREGISTERED/invalid
+    result from FCM, and a transaction preserves tokens registered concurrently
+    by another browser.
+    """
+    invalid = {token for token in invalid_tokens if isinstance(token, str) and token}
+    if not invalid:
+        return 0
+    from firebase_admin import firestore  # lazy import for SERVER_TIMESTAMP
+
+    db = get_db()
+    ref = db.collection("users").document(uid).collection(ALERT_SETTINGS).document(ALERT_SETTINGS_DOC_ID)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def remove_in_transaction(transaction):
+        snap = ref.get(transaction=transaction)
+        data = snap.to_dict() or {}
+        current = data.get("pushTokens") if isinstance(data.get("pushTokens"), list) else []
+        next_tokens = [token for token in current if token not in invalid]
+        removed = len(current) - len(next_tokens)
+        if removed:
+            transaction.update(ref, {"pushTokens": next_tokens, "updatedAt": firestore.SERVER_TIMESTAMP})
+        return removed
+
+    return int(remove_in_transaction(transaction))
 
 
 # --- Test-push request queue (browser -> engine bridge) ----------------------
