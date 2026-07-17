@@ -19,15 +19,40 @@ import {
   updateDoc,
   where,
   type DocumentData,
+  type UpdateData,
   type QueryConstraint,
   type QueryDocumentSnapshot,
 } from "firebase/firestore";
 import { firestoreDb } from "@/lib/firebase/client";
 
-function sanitizeFirestorePayload(data: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(data).filter(([, v]) => v !== undefined)
-  );
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+// Firestore rejects undefined at every depth (including objects inside arrays).
+// Do not use JSON serialization here: FieldValue/serverTimestamp instances must
+// remain intact, while false, 0, null and empty arrays are meaningful values.
+function sanitizeFirestoreValue(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeFirestoreValue(item))
+      .filter((item): item is Exclude<typeof item, undefined> => item !== undefined);
+  }
+  if (isPlainObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .map(([key, item]) => [key, sanitizeFirestoreValue(item)] as const)
+        .filter(([, item]) => item !== undefined),
+    );
+  }
+  return value;
+}
+
+export function sanitizeFirestorePayload(data: Record<string, unknown>): Record<string, unknown> {
+  return sanitizeFirestoreValue(data) as Record<string, unknown>;
 }
 import {
   alertRuleDoc,
@@ -94,10 +119,10 @@ export async function deleteAlertRule(uid: string, id: string): Promise<void> {
 }
 
 export async function setAlertRuleEnabled(uid: string, id: string, enabled: boolean): Promise<void> {
-  await updateDoc(alertRuleDoc(requireDb(), uid, id), {
+  await updateDoc(alertRuleDoc(requireDb(), uid, id), sanitizeFirestorePayload({
     enabled,
     updatedAt: serverTimestamp(),
-  });
+  }) as UpdateData<DocumentData>);
 }
 
 // --- NotificationLog ---------------------------------------------------------

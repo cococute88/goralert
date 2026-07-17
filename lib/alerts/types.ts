@@ -38,7 +38,8 @@ export type DateEventSelector = {
   source: "calendarCustomEvents" | "calendarEvents";
   match?: {
     ticker?: string;
-    type?: string;
+    // Legacy rules used one string. New rules can select multiple event types.
+    type?: string | string[];
     titleContains?: string;
   };
   markFilter?: CalendarMark[];
