@@ -64,6 +64,19 @@ def _fcm_detail(exc: BaseException) -> str:
     return " ".join(parts)
 
 
+def _is_confirmed_unregistered(exc: Optional[BaseException]) -> bool:
+    """True only when FCM confirms that this registration token is gone.
+
+    INVALID_ARGUMENT can describe a malformed request, and SENDER_ID_MISMATCH
+    can expose a project/configuration failure. Neither is safe evidence for
+    deleting a user token. The Admin SDK's UnregisteredError (or canonical
+    UNREGISTERED code) is the narrow, permanent-token signal.
+    """
+    if exc is None:
+        return False
+    return type(exc).__name__ == "UnregisteredError" or _fcm_error_code(exc).upper() == "UNREGISTERED"
+
+
 class PushChannel:
     name = "push"
 
@@ -132,11 +145,7 @@ class PushChannel:
             logger.error("[push]   token=%s -> FAILED code=%s detail=%s", short, code, detail)
             errors.append(f"{short}: {detail}")
 
-            # Dead/invalid tokens -> mark for cleanup. UnregisteredError and
-            # invalid-argument/sender-mismatch mean the token will never work.
-            name = type(exc).__name__ if exc is not None else ""
-            if any(k in name for k in ("Unregistered", "InvalidArgument", "SenderIdMismatch", "NotFound")) or \
-               any(k in code.upper() for k in ("UNREGISTERED", "INVALID_ARGUMENT", "SENDER_ID_MISMATCH", "NOT_FOUND")):
+            if _is_confirmed_unregistered(exc):
                 invalid.append(token)
 
         if batch.success_count > 0:

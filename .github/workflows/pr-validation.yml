@@ -1,0 +1,47 @@
+name: PR Validation
+
+# This workflow is intentionally secret-free. On pull_request, checkout's
+# default is refs/pull/<number>/merge, so the exact merge candidate—not main—is
+# typechecked, linted and built. On push/workflow_dispatch it checks the event
+# ref. Production delivery workflows deliberately live elsewhere and checkout
+# main because they may access real credentials.
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout PR merge candidate or event ref
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Build application
+        run: npm run build
+
+      - name: Test Firestore payload sanitizer
+        run: npm run test:firestore-payload
