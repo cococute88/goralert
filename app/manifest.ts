@@ -13,10 +13,14 @@ export default function manifest(): MetadataRoute.Manifest {
     background_color: "#ffffff",
     theme_color: "#ffffff",
     icons: [
-      // TODO(branding): 고라알림 전용 아이콘 추가 시 교체. 현재는 기존 로고 재사용.
       {
-        src: "/gorani-logo.png",
-        sizes: "any",
+        src: "/gorani-bell-192.png",
+        sizes: "192x192",
+        type: "image/png",
+      },
+      {
+        src: "/gorani-bell-512.png",
+        sizes: "512x512",
         type: "image/png",
       },
     ],

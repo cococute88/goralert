@@ -20,7 +20,7 @@ export default function PushForegroundMessages() {
       // Browsers do not automatically display a system notification for an
       // onMessage foreground delivery. This runs only after FCM reception.
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-        new Notification(title, { body, icon: "/gorani-logo.png" });
+        new Notification(title, { body, icon: "/gorani-bell-192.png" });
       }
     }).then((next) => {
       if (active) unsubscribe = next;
