@@ -38,9 +38,12 @@ export const metadata: Metadata = {
     images: ["/gorani-logo.png"],
   },
   icons: {
-    icon: "/gorani-logo.png",
-    shortcut: "/gorani-logo.png",
-    apple: "/gorani-logo.png",
+    icon: [
+      { url: "/gorani-bell-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/gorani-bell-192.png", sizes: "192x192", type: "image/png" },
+    ],
+    shortcut: [{ url: "/gorani-bell-32.png", sizes: "32x32", type: "image/png" }],
+    apple: [{ url: "/gorani-bell-180.png", sizes: "180x180", type: "image/png" }],
   },
 };
 

@@ -96,8 +96,8 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.messagin
     var title = notification.title || data.title || "고라알림";
     var options = {
       body: notification.body || data.body || "새로운 알림이 도착했습니다.",
-      icon: "/gorani-logo.png",
-      badge: "/gorani-logo.png",
+      icon: "/gorani-bell-192.png",
+      badge: "/gorani-bell-32.png",
       data: data,
     };
     self.registration.showNotification(title, options);
