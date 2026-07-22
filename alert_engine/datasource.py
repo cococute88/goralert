@@ -275,9 +275,16 @@ class AlertDataSource:
         if ev_type:
             raw_types = ev_type if isinstance(ev_type, list) else [ev_type]
             # Old UI hints stored these two values even though the calendar's
-            # actual persisted codes are ex_div/buy_by. Keep existing rules
-            # functional while new rules write the canonical codes.
-            aliases = {"ex-dividend": "ex_div", "buy-deadline": "buy_by"}
+            # actual persisted codes are ex_div/buy_by. `buy_by_minus_1` is an
+            # alert-only selector: it reads the same buy_by source event and
+            # DateEvaluator derives the notification date one calendar day
+            # earlier. Keep existing rules functional while new rules write
+            # canonical selector codes.
+            aliases = {
+                "ex-dividend": "ex_div",
+                "buy-deadline": "buy_by",
+                "buy_by_minus_1": "buy_by",
+            }
             accepted_types = {
                 aliases.get(str(item).strip(), str(item).strip())
                 for item in raw_types
