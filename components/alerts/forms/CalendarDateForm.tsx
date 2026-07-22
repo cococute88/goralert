@@ -9,8 +9,8 @@ import {
   CALENDAR_EVENT_TYPE_OPTIONS,
   isKnownCalendarEventType,
   normalizeCalendarEventTypes,
+  type AlertCalendarEventType,
 } from "@/lib/alerts/calendar-event-types";
-import type { CalendarEventType } from "@/lib/calendar-types";
 import { Field, Select, TimeInput, TextInput, SEOUL_TZ, type RuleFormProps } from "./fields";
 
 const SOURCE_OPTIONS: { value: DateEventSelector["source"]; label: string }[] = [
@@ -59,7 +59,7 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
     updateSelector({ match: Object.keys(next).length ? next : undefined });
   };
 
-  const toggleEventType = (eventType: CalendarEventType) => {
+  const toggleEventType = (eventType: AlertCalendarEventType) => {
     const next = selectedEventTypes.includes(eventType)
       ? selectedEventTypes.filter((item) => item !== eventType)
       : [...selectedEventTypes, eventType];
