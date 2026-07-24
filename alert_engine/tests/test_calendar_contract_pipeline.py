@@ -1,0 +1,246 @@
+"""Regression coverage for the Gorani -> Goralert calendar contract."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from alert_engine.calendar_contract import resolve_calendar_events
+from alert_engine.datasource import AlertDataSource
+from alert_engine.engine import STATUS_DELIVERED, STATUS_NOT_TRIGGERED
+from alert_engine.models import AlertRule, AlertSettings
+
+from .conftest import FakeChannel, FakeFirestore, build_engine
+
+
+EVENT = {
+    "id": "dividend:TEST:buy:2026-08-10",
+    "canonicalEventId": "dividend:TEST:buy:2026-08-10",
+    "legacyEventId": "TEST-buy_by-2026-08-10",
+    "ticker": "TEST",
+    "type": "buy_by",
+    "date": "2026-08-10",
+    "title": "TEST Deadline",
+    "sourceKind": "declared",
+}
+
+
+def _resolved(metadata: list[dict], events: list[dict] | None = None) -> list[dict]:
+    return resolve_calendar_events(events or [EVENT], [], metadata)
+
+
+class ContractFirestore(FakeFirestore):
+    def __init__(self, events: list[dict]):
+        super().__init__(
+            settings=AlertSettings(
+                globalEnabled=True,
+                telegramChatId="chat-123",
+                pushTokens=["push-token"],
+            )
+        )
+        self.events = events
+
+    def read_calendar_events(self, uid: str):
+        return list(self.events)
+
+    def read_calendar_custom_events(self, uid: str):
+        return list(self.events)
+
+
+def _rule(
+    event_type: str = "buy_by",
+    marks: list[str] | None = None,
+    title_contains: str | None = None,
+    source: str = "calendarEvents",
+) -> AlertRule:
+    match: dict = {"type": [event_type]}
+    if title_contains is not None:
+        match["titleContains"] = title_contains
+    return AlertRule.from_dict({
+        "id": f"rule-{event_type}-{source}",
+        "uid": "user-1",
+        "kind": "date",
+        "name": "캘린더 계약 테스트",
+        "enabled": True,
+        "condition": {
+            "kind": "date",
+            "selector": {
+                "source": source,
+                "match": match,
+                "markFilter": marks or [],
+            },
+        },
+        "trigger": {
+            "mode": "recurring",
+            "recurrence": {"kind": "calendar", "tz": "Asia/Seoul", "time": "09:00"},
+        },
+        "delivery": {
+            "channels": ["push", "telegram"],
+            "message": {"title": "일정", "body": "{ticker} 일정"},
+        },
+    })
+
+
+def test_metadata_without_date_joins_authoritative_body_by_canonical_id():
+    metadata = [{
+        "id": "different-firestore-doc-id",
+        "eventId": "old-generated-id",
+        "canonicalEventId": EVENT["canonicalEventId"],
+        "heart": True,
+    }]
+
+    joined = _resolved(metadata)
+
+    assert len(joined) == 1
+    assert joined[0]["date"] == "2026-08-10"
+    assert joined[0]["type"] == "buy_by"
+    assert joined[0]["heart"] is True
+
+
+def test_firestore_document_id_and_legacy_generated_id_are_compatible():
+    metadata = [{
+        "id": "metadata-payload-id",
+        "firestoreDocumentId": EVENT["legacyEventId"],
+        "star": True,
+    }]
+
+    joined = _resolved(metadata)
+
+    assert len(joined) == 1
+    assert joined[0]["star"] is True
+
+
+def test_saved_cache_supersedes_legacy_rows_for_the_same_ticker():
+    stale_legacy = {**EVENT, "id": "legacy-row", "date": "2026-07-01"}
+    metadata = [{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}]
+
+    joined = resolve_calendar_events([EVENT], [stale_legacy], metadata)
+
+    assert [event["date"] for event in joined] == ["2026-08-10"]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "marks", "expected"),
+    [
+        ({"heart": True}, ["heart"], 1),
+        ({"heart": False}, ["heart"], 0),
+        ({"star": True}, ["star"], 1),
+        ({"star": True}, ["star", "heart"], 1),
+        ({}, [], 1),
+    ],
+)
+def test_mark_filter_contract(metadata, marks, expected):
+    rows = _resolved([{**metadata, "canonicalEventId": EVENT["canonicalEventId"]}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    selector = _rule(marks=marks).condition.selector
+
+    assert len(datasource.get_calendar_events("user-1", selector)) == expected
+
+
+def test_title_contains_empty_and_unicode_safe_case_insensitive_partial_match():
+    rows = _resolved([{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+
+    assert len(datasource.get_calendar_events("user-1", _rule(title_contains=" ").condition.selector)) == 1
+    assert len(datasource.get_calendar_events("user-1", _rule(title_contains="deadline").condition.selector)) == 1
+    assert len(datasource.get_calendar_events("user-1", _rule(title_contains="DEADLINE").condition.selector)) == 1
+
+
+def test_metadata_without_authoritative_body_never_creates_an_event():
+    metadata = [{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}]
+    assert resolve_calendar_events([], [], metadata) == []
+
+
+def test_sample_or_mock_fallback_is_never_promoted_to_an_alert_event():
+    metadata = [{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}]
+    sample = {**EVENT, "sourceKind": "sample"}
+    mock = {**EVENT, "source": "mock"}
+
+    assert resolve_calendar_events([sample, mock], [], metadata) == []
+
+
+def test_custom_event_uses_body_and_ignores_inapplicable_legacy_mark_default():
+    custom = [{
+        "id": "custom:test-event",
+        "canonicalEventId": "custom:test-event",
+        "sourceKind": "custom",
+        "ticker": "TEST",
+        "type": "custom",
+        "date": "2026-08-10",
+        "title": "사용자 일정",
+    }]
+    firestore = ContractFirestore(custom)
+    datasource = AlertDataSource(firestore=firestore)
+    selector = _rule(event_type="custom", marks=["star", "heart"], source="calendarCustomEvents").condition.selector
+
+    assert datasource.get_calendar_events("user-1", selector) == custom
+
+
+def test_matching_calendar_event_runs_log_push_and_telegram_once():
+    rows = _resolved([{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+    now = datetime(2026, 8, 10, 0, 5, tzinfo=timezone.utc)
+    rule = _rule(marks=["heart"])
+
+    first = engine.process_rule(rule, now=now)
+    duplicate = engine.process_rule(rule, now=now.replace(minute=10))
+
+    assert first.status == STATUS_DELIVERED
+    assert duplicate.status != STATUS_DELIVERED
+    assert len(firestore.logs) == 1
+    assert push.calls == 1
+    assert telegram.calls == 1
+    log = next(iter(firestore.logs.values()))
+    assert {result.channel for result in log.channels} == {"push", "telegram"}
+
+
+def test_custom_event_runs_the_same_log_and_dispatch_pipeline():
+    custom = [{
+        "id": "custom:test-event",
+        "canonicalEventId": "custom:test-event",
+        "sourceKind": "custom",
+        "ticker": "TEST",
+        "type": "custom",
+        "date": "2026-08-10",
+        "title": "사용자 일정",
+    }]
+    firestore = ContractFirestore(custom)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+
+    result = engine.process_rule(
+        _rule(event_type="custom", marks=["star"], source="calendarCustomEvents"),
+        now=datetime(2026, 8, 10, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert result.status == STATUS_DELIVERED
+    assert len(firestore.logs) == 1
+    assert push.calls == telegram.calls == 1
+
+
+def test_non_matching_calendar_event_does_not_log_or_dispatch():
+    rows = _resolved([{"canonicalEventId": EVENT["canonicalEventId"], "heart": False}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+
+    result = engine.process_rule(
+        _rule(marks=["heart"]),
+        now=datetime(2026, 8, 10, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert result.status == STATUS_NOT_TRIGGERED
+    assert firestore.logs == {}
+    assert push.calls == 0
+    assert telegram.calls == 0

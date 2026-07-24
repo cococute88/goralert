@@ -193,6 +193,22 @@ def due_now(
     return window_start <= occ <= now
 
 
+def calendar_due_now(
+    recurrence: Optional[Recurrence],
+    now: Optional[datetime] = None,
+    window_minutes: int = 30,
+) -> bool:
+    """True when today's calendar-alert wall time is within the due window."""
+    if recurrence is None or recurrence.kind != "calendar":
+        return False
+    tz = get_tz(recurrence.tz)
+    aware = _ensure_aware(now, tz) if now else datetime.now(tz)
+    hours, minutes = parse_hh_mm(recurrence.time or "09:00")
+    occurrence = aware.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+    window_start = aware - timedelta(minutes=max(0, window_minutes))
+    return window_start <= occurrence <= aware
+
+
 def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes: int = 30) -> str:
     """Stable ISO bucket string used to build the idempotency eventId.
 
@@ -201,6 +217,13 @@ def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes:
     non-scheduled (threshold) rules we bucket ``now`` down to the window grid.
     """
     recurrence = trigger.recurrence if trigger else None
+    if recurrence is not None and recurrence.kind == "calendar":
+        tz = get_tz(recurrence.tz)
+        aware = _ensure_aware(now, tz)
+        hours, minutes = parse_hh_mm(recurrence.time or "09:00")
+        occurrence = aware.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        return occurrence.isoformat()
+
     if recurrence is not None and recurrence.kind not in ("calendar", None):
         tz = get_tz(recurrence.tz)
         aware = _ensure_aware(now, tz)

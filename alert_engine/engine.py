@@ -43,7 +43,7 @@ from .models import (
     ChannelResult,
     NotificationLog,
 )
-from .recurrence import bucket_time, due_now, get_tz, parse_hh_mm
+from .recurrence import bucket_time, calendar_due_now, due_now, get_tz, parse_hh_mm
 
 logger = logging.getLogger("alert_engine.engine")
 
@@ -116,13 +116,13 @@ class AlertEngine:
         firestore=None,
         config: Optional[EngineConfig] = None,
     ):
-        self.datasource = datasource or AlertDataSource()
-        self.evaluators = evaluator_registry or build_default_registry(self.datasource)
-        self.channels = channel_registry or build_default_channels()
-        self.config = config or load_config()
         if firestore is None:
             from . import firestore_client as firestore  # lazy import
         self.firestore = firestore
+        self.datasource = datasource or AlertDataSource(firestore=self.firestore)
+        self.evaluators = evaluator_registry or build_default_registry(self.datasource)
+        self.channels = channel_registry or build_default_channels()
+        self.config = config or load_config()
 
     # --- main pipeline -------------------------------------------------------
 
@@ -150,9 +150,15 @@ class AlertEngine:
         trigger = rule.trigger
         recurrence = trigger.recurrence if trigger else None
 
-        # 2. recurrence "due now" gate (skip for calendar-driven / no recurrence)
-        if recurrence is not None and recurrence.kind not in ("calendar", None):
-            if not due_now(recurrence, now, self.config.eval_window_minutes):
+        # 2. recurrence "due now" gate. Calendar rules use the same fixed
+        # wall-clock time selected in the UI, while their date comes from data.
+        if recurrence is not None:
+            is_due = (
+                calendar_due_now(recurrence, now, self.config.eval_window_minutes)
+                if recurrence.kind == "calendar"
+                else due_now(recurrence, now, self.config.eval_window_minutes)
+            )
+            if not is_due:
                 return ProcessResult(rule.id, rule.uid, STATUS_NOT_DUE, "recurrence not due")
 
         # 3. evaluate

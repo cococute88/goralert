@@ -18,18 +18,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from ..calendar_contract import normalize_calendar_event_type
 from ..models import AlertRule, Condition
 from ..recurrence import get_tz
 from .base import EvalContext, EvalResult
 
 
 BUY_BY_MINUS_ONE_EVENT_TYPE = "buy_by_minus_1"
-_EVENT_TYPE_ALIASES = {
-    "ex-dividend": "ex_div",
-    "buy-deadline": "buy_by",
-}
-
-
 def _calendar_date(value: object) -> date | None:
     """Parse the date portion stored by the calendar without timezone conversion."""
     try:
@@ -45,7 +40,7 @@ def _selected_event_types(condition: Condition) -> set[str]:
     raw_types = match.get("type") if isinstance(match, dict) else None
     values = raw_types if isinstance(raw_types, list) else [raw_types]
     return {
-        _EVENT_TYPE_ALIASES.get(str(value).strip(), str(value).strip())
+        normalize_calendar_event_type(value)
         for value in values
         if isinstance(value, str) and value.strip()
     }
@@ -64,7 +59,7 @@ def _notification_events(events: list[dict], selected_types: set[str]) -> list[d
         event_date = _calendar_date(event.get("date"))
         if event_date is None:
             continue
-        raw_type = str(event.get("type", ""))
+        raw_type = normalize_calendar_event_type(event.get("type"))
 
         # No event-type filter retains the existing behavior: the raw calendar
         # event fires on its own stored date.
@@ -108,7 +103,8 @@ class DateEvaluator:
                 ctx.extra["matchedEvents"] = todays
             detail = (
                 f"date calendar[{condition.selector.source}]: {len(todays)} "
-                f"event(s) on {today} (markFilter={condition.selector.markFilter}) -> {triggered}"
+                f"date matched on {today} from {len(candidates)} candidate(s) "
+                f"(markFilter={condition.selector.markFilter}) -> {triggered}"
             )
             return EvalResult(triggered, float(len(todays)), detail)
 

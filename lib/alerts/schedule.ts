@@ -13,7 +13,9 @@
 // no DST so this is exact. For a hypothetical DST tz the stride is re-resolved
 // per occurrence via zonedTimeToUtc, keeping each fire on the intended wall time.
 
-import type { Recurrence, TriggerPolicy } from "./types";
+import { calendarNotificationDates } from "@/lib/calendar-contract";
+import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
+import type { AlertRule, Recurrence, TriggerPolicy } from "./types";
 
 const DEFAULT_TZ = "Asia/Seoul";
 const DEFAULT_TIME = "09:00";
@@ -199,6 +201,30 @@ export function nextOccurrence(trigger: TriggerPolicy | undefined, from: Date = 
       // Event-driven (driven by calendar data) — not predictable here.
       return null;
   }
+}
+
+// Resolve an event-driven calendar rule against the same joined event contract
+// used by the Python engine. Other rule kinds keep the existing recurrence path.
+export function nextRuleOccurrence(
+  rule: AlertRule,
+  events: ResolvedCalendarEvent[],
+  from: Date = new Date(),
+): Date | null {
+  if (rule.trigger.recurrence?.kind !== "calendar") {
+    return nextOccurrence(rule.trigger, from);
+  }
+  const recurrence = rule.trigger.recurrence;
+  const tz = recurrence.tz || DEFAULT_TZ;
+  const { hours, minutes } = parseHhMm(recurrence.time ?? DEFAULT_TIME);
+  const candidates = calendarNotificationDates(rule, events)
+    .map((date) => {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+      if (!match) return null;
+      return zonedTimeToUtc(Number(match[1]), Number(match[2]), Number(match[3]), hours, minutes, tz);
+    })
+    .filter((date): date is Date => date !== null && date.getTime() >= from.getTime())
+    .sort((a, b) => a.getTime() - b.getTime());
+  return candidates[0] ?? null;
 }
 
 // True when the next occurrence falls on the same calendar day as `from`,

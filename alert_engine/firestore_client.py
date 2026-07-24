@@ -13,7 +13,9 @@ Collections (mirroring ``lib/alerts/collections.ts`` + calendar repos):
 - users/{uid}/notificationLogs/{id}
 - users/{uid}/alertSettings/default
 - users/{uid}/calendarEvents/{id}        (READ-ONLY, meta incl. star/heart)
+- users/{uid}/calendarCache/{ticker}     (READ-ONLY, generated event bodies)
 - users/{uid}/calendarCustomEvents/{id}  (READ-ONLY)
+- users/{uid}/calendarPortfolios/{id}/... (READ-ONLY, active named portfolio)
 - users/{uid}/calendarAlertMarks/{id}    (🔔 bell, Goralert-owned)
 """
 
@@ -23,6 +25,12 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
+from .calendar_contract import (
+    DEFAULT_CALENDAR_PORTFOLIO_ID,
+    join_calendar_metadata,
+    normalize_authoritative_event,
+    select_authoritative_events,
+)
 from .config import load_config, load_service_account_dict
 from .models import AlertRule, AlertSettings, NotificationLog
 
@@ -34,6 +42,10 @@ ALERT_SETTINGS = "alertSettings"
 ALERT_SETTINGS_DOC_ID = "default"
 CALENDAR_EVENTS = "calendarEvents"
 CALENDAR_CUSTOM_EVENTS = "calendarCustomEvents"
+CALENDAR_CACHE = "calendarCache"
+CALENDAR_SETTINGS = "calendarSettings"
+CALENDAR_EVENT_METAS = "calendarEventMetas"
+CALENDAR_PORTFOLIOS = "calendarPortfolios"
 CALENDAR_ALERT_MARKS = "calendarAlertMarks"
 TEST_PUSH_REQUESTS = "testPushRequests"
 
@@ -227,22 +239,112 @@ def load_alert_settings(uid: str) -> AlertSettings:
 # --- Calendar (READ-ONLY) ----------------------------------------------------
 
 
-def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
-    """Read users/{uid}/calendarEvents (meta incl. star/heart/ticker/type)."""
-    db = get_db()
+def _read_collection(collection_ref) -> List[Dict[str, Any]]:
+    """Read a collection while preserving each Firestore document ID."""
     out: List[Dict[str, Any]] = []
-    for snap in db.collection("users").document(uid).collection(CALENDAR_EVENTS).stream():
-        out.append({"id": snap.id, **(snap.to_dict() or {})})
+    for snap in collection_ref.stream():
+        data = snap.to_dict() or {}
+        out.append({
+            "id": data.get("id") or snap.id,
+            "firestoreDocumentId": snap.id,
+            **data,
+        })
     return out
+
+
+def _active_calendar_portfolio_id(user_ref) -> str:
+    settings = user_ref.collection(CALENDAR_SETTINGS).document("default").get()
+    if not settings.exists:
+        return DEFAULT_CALENDAR_PORTFOLIO_ID
+    value = (settings.to_dict() or {}).get("activePortfolioId")
+    return value.strip() if isinstance(value, str) and value.strip() else DEFAULT_CALENDAR_PORTFOLIO_ID
+
+
+def _calendar_scope(uid: str):
+    """Return active portfolio refs matching Gorani Finance's repository paths."""
+    db = get_db()
+    user_ref = db.collection("users").document(uid)
+    portfolio_id = _active_calendar_portfolio_id(user_ref)
+    if portfolio_id == DEFAULT_CALENDAR_PORTFOLIO_ID:
+        return {
+            "portfolio_id": portfolio_id,
+            "metadata": user_ref.collection(CALENDAR_EVENTS),
+            "cache": user_ref.collection(CALENDAR_CACHE),
+            "custom": user_ref.collection(CALENDAR_CUSTOM_EVENTS),
+            "legacy": user_ref.collection(CALENDAR_EVENTS),
+        }
+    portfolio_ref = user_ref.collection(CALENDAR_PORTFOLIOS).document(portfolio_id)
+    return {
+        "portfolio_id": portfolio_id,
+        "metadata": portfolio_ref.collection(CALENDAR_EVENT_METAS),
+        "cache": portfolio_ref.collection(CALENDAR_CACHE),
+        "custom": portfolio_ref.collection(CALENDAR_CUSTOM_EVENTS),
+        "legacy": None,
+    }
+
+
+def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
+    """Resolve Gorani generated/legacy bodies and join star/heart metadata."""
+    scope = _calendar_scope(uid)
+    metadata = _read_collection(scope["metadata"])
+    cache_docs = _read_collection(scope["cache"])
+
+    cache_events: List[Dict[str, Any]] = []
+    for cache_doc in cache_docs:
+        fallback_ticker = str(cache_doc.get("ticker") or cache_doc.get("id") or "")
+        raw_events = cache_doc.get("events")
+        if not isinstance(raw_events, list):
+            continue
+        for raw_event in raw_events:
+            if not isinstance(raw_event, dict):
+                continue
+            normalized = normalize_authoritative_event(raw_event, fallback_ticker=fallback_ticker)
+            if normalized is not None:
+                cache_events.append(normalized)
+
+    legacy_docs = _read_collection(scope["legacy"]) if scope["legacy"] is not None else []
+    legacy_events = [
+        event
+        for event in (
+            normalize_authoritative_event(doc, fallback_id=str(doc.get("id") or ""))
+            for doc in legacy_docs
+        )
+        if event is not None
+    ]
+    authoritative = select_authoritative_events(cache_events, legacy_events)
+    joined = join_calendar_metadata(authoritative, metadata)
+    logger.info(
+        "calendar read success source=calendarEvents portfolio=%s metadata=%d "
+        "cache_documents=%d authoritative=%d join=%d",
+        scope["portfolio_id"],
+        len(metadata),
+        len(cache_docs),
+        len(authoritative),
+        len(joined),
+    )
+    return joined
 
 
 def read_calendar_custom_events(uid: str) -> List[Dict[str, Any]]:
-    """Read users/{uid}/calendarCustomEvents (id,title,date,type,ticker?)."""
-    db = get_db()
-    out: List[Dict[str, Any]] = []
-    for snap in db.collection("users").document(uid).collection(CALENDAR_CUSTOM_EVENTS).stream():
-        out.append({"id": snap.id, **(snap.to_dict() or {})})
-    return out
+    """Read custom event bodies from the user's active Gorani portfolio."""
+    scope = _calendar_scope(uid)
+    raw_events = _read_collection(scope["custom"])
+    events = [
+        event
+        for event in (
+            normalize_authoritative_event(doc, fallback_id=str(doc.get("id") or ""))
+            for doc in raw_events
+        )
+        if event is not None
+    ]
+    logger.info(
+        "calendar read success source=calendarCustomEvents portfolio=%s "
+        "metadata=0 authoritative=%d join=%d",
+        scope["portfolio_id"],
+        len(raw_events),
+        len(events),
+    )
+    return events
 
 
 def read_calendar_alert_marks(uid: str) -> List[Dict[str, Any]]:

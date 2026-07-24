@@ -68,6 +68,25 @@ Key design properties:
 | `models.py` | dataclasses mirroring the TS `lib/alerts/types.ts` shapes |
 | `config.py` / `main.py` | env/config + CLI entrypoint |
 
+### Gorani calendar read contract
+
+Gorani's generated calendar event body and its user metadata are deliberately
+separate. The engine resolves the user's active calendar portfolio and reads:
+
+| Data | Default portfolio | Named portfolio |
+| --- | --- | --- |
+| generated event bodies | `users/{uid}/calendarCache/{ticker}.events[]` | `users/{uid}/calendarPortfolios/{portfolioId}/calendarCache/{ticker}.events[]` |
+| star/heart/memo metadata | `users/{uid}/calendarEvents/{eventId}` | `users/{uid}/calendarPortfolios/{portfolioId}/calendarEventMetas/{eventId}` |
+| custom event bodies | `users/{uid}/calendarCustomEvents/{eventId}` | `users/{uid}/calendarPortfolios/{portfolioId}/calendarCustomEvents/{eventId}` |
+| active portfolio | `users/{uid}/calendarSettings/default.activePortfolioId` | same setting |
+
+Default-portfolio `calendarEvents` may also contain full legacy-imported event
+bodies. Saved ticker cache rows supersede legacy rows for that ticker, matching
+Gorani's calendar rendering policy. Metadata is joined by `canonicalEventId`,
+`eventId`, Firestore document ID, and supported legacy/generated IDs. Documents
+without a real event body never become alerts, and `sample`/`mock` fallback
+events are rejected.
+
 ### Reuse of `original/logic/market.py`
 
 RSI is **not** re-implemented. `datasource.py` imports
