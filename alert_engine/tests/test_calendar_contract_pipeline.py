@@ -115,9 +115,45 @@ def test_saved_cache_supersedes_legacy_rows_for_the_same_ticker():
     stale_legacy = {**EVENT, "id": "legacy-row", "date": "2026-07-01"}
     metadata = [{"canonicalEventId": EVENT["canonicalEventId"], "heart": True}]
 
-    joined = resolve_calendar_events([EVENT], [stale_legacy], metadata)
+    joined = resolve_calendar_events([EVENT], [stale_legacy], metadata, ["TEST"])
 
     assert [event["date"] for event in joined] == ["2026-08-10"]
+
+
+def test_empty_authoritative_cache_suppresses_stale_legacy_event():
+    stale_legacy = {**EVENT, "id": "legacy-row"}
+
+    assert resolve_calendar_events([], [stale_legacy], [], ["TEST"]) == []
+
+
+def test_missing_cache_document_preserves_legacy_fallback():
+    stale_legacy = {**EVENT, "id": "legacy-row"}
+
+    resolved = resolve_calendar_events([], [stale_legacy], [], [])
+
+    assert [(event["ticker"], event["id"], event["date"]) for event in resolved] == [
+        ("TEST", "legacy-row", "2026-08-10")
+    ]
+
+
+def test_empty_and_populated_cache_tickers_resolve_independently():
+    stale_test = {**EVENT, "id": "legacy-test"}
+    stale_abc = {**EVENT, "id": "legacy-abc", "ticker": "ABC"}
+    cache_abc = {
+        **EVENT,
+        "id": "cache-abc",
+        "canonicalEventId": "dividend:ABC:buy:2026-08-10",
+        "ticker": "ABC",
+    }
+
+    resolved = resolve_calendar_events(
+        [cache_abc],
+        [stale_test, stale_abc],
+        [],
+        ["TEST", "ABC"],
+    )
+
+    assert [(event["ticker"], event["id"]) for event in resolved] == [("ABC", "cache-abc")]
 
 
 @pytest.mark.parametrize(
@@ -237,6 +273,26 @@ def test_non_matching_calendar_event_does_not_log_or_dispatch():
 
     result = engine.process_rule(
         _rule(marks=["heart"]),
+        now=datetime(2026, 8, 10, 0, 5, tzinfo=timezone.utc),
+    )
+
+    assert result.status == STATUS_NOT_TRIGGERED
+    assert firestore.logs == {}
+    assert push.calls == 0
+    assert telegram.calls == 0
+
+
+def test_empty_authoritative_cache_does_not_log_or_dispatch():
+    stale_legacy = {**EVENT, "id": "legacy-row"}
+    rows = resolve_calendar_events([], [stale_legacy], [], ["TEST"])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+
+    result = engine.process_rule(
+        _rule(),
         now=datetime(2026, 8, 10, 0, 5, tzinfo=timezone.utc),
     )
 

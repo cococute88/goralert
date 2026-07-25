@@ -121,11 +121,17 @@ export function resolveGeneratedCalendarEvents(
   cacheEvents: ResolvedCalendarEvent[],
   legacyEvents: ResolvedCalendarEvent[],
   metadata: CalendarEventMeta[],
+  cacheDocumentTickers: Iterable<string> = [],
 ): ResolvedCalendarEvent[] {
-  const cacheTickers = new Set(cacheEvents.map((event) => event.ticker).filter(Boolean));
+  const cacheTickers = new Set(
+    [
+      ...Array.from(cacheDocumentTickers, (ticker) => text(ticker).toUpperCase()),
+      ...cacheEvents.map((event) => text(event.ticker).toUpperCase()),
+    ].filter(Boolean),
+  );
   const authoritative = dedupeEvents([
     ...cacheEvents,
-    ...legacyEvents.filter((event) => !cacheTickers.has(event.ticker)),
+    ...legacyEvents.filter((event) => !cacheTickers.has(text(event.ticker).toUpperCase())),
   ]);
   const metaLookup = new Map<string, CalendarEventMeta[]>();
   metadata.forEach((meta) => {

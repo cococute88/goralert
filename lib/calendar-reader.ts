@@ -54,9 +54,11 @@ export async function loadResolvedCalendarEvents(uid: string): Promise<ResolvedC
   const metadata = metadataFromSnapshots(metadataSnap.docs);
 
   const cacheEvents: ResolvedCalendarEvent[] = [];
+  const cacheDocumentTickers = new Set<string>();
   cacheSnap.docs.forEach((cacheDoc) => {
     const data = cacheDoc.data();
-    const ticker = typeof data.ticker === "string" ? data.ticker : cacheDoc.id;
+    const ticker = (typeof data.ticker === "string" ? data.ticker : cacheDoc.id).trim().toUpperCase();
+    if (ticker) cacheDocumentTickers.add(ticker);
     if (!Array.isArray(data.events)) return;
     data.events.forEach((raw) => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
@@ -81,7 +83,12 @@ export async function loadResolvedCalendarEvents(uid: string): Promise<ResolvedC
         return event ? [event] : [];
       })
     : [];
-  const generated = resolveGeneratedCalendarEvents(cacheEvents, legacyEvents, metadata);
+  const generated = resolveGeneratedCalendarEvents(
+    cacheEvents,
+    legacyEvents,
+    metadata,
+    cacheDocumentTickers,
+  );
 
   const custom = customSnap.docs.flatMap((item) => {
     const event = normalizeAuthoritativeCalendarEvent(

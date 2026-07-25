@@ -151,14 +151,24 @@ def _dedupe_events(events: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def select_authoritative_events(
     cache_events: Iterable[Dict[str, Any]],
     legacy_events: Iterable[Dict[str, Any]],
+    cache_tickers: Iterable[str] = (),
 ) -> List[Dict[str, Any]]:
-    """Mirror Gorani's policy: a saved ticker cache supersedes legacy rows."""
+    """Mirror Gorani's policy: a saved ticker cache supersedes legacy rows.
+
+    ``cache_tickers`` represents cache *document existence*, independently of
+    whether a document currently contains any events.  An empty saved cache is
+    authoritative for its ticker and must suppress stale legacy rows.
+    """
     normalized_cache = [
         normalized
         for event in cache_events
         if (normalized := normalize_authoritative_event(event)) is not None
     ]
     cache_tickers = {
+        _text(ticker).upper()
+        for ticker in cache_tickers
+        if _text(ticker)
+    } | {
         _event_ticker(event)
         for event in normalized_cache
         if _event_ticker(event)
@@ -210,7 +220,8 @@ def resolve_calendar_events(
     cache_events: Iterable[Dict[str, Any]],
     legacy_events: Iterable[Dict[str, Any]],
     metadata_docs: Iterable[Dict[str, Any]],
+    cache_tickers: Iterable[str] = (),
 ) -> List[Dict[str, Any]]:
     """Resolve generated/legacy bodies and attach their read-only metadata."""
-    authoritative = select_authoritative_events(cache_events, legacy_events)
+    authoritative = select_authoritative_events(cache_events, legacy_events, cache_tickers)
     return join_calendar_metadata(authoritative, metadata_docs)

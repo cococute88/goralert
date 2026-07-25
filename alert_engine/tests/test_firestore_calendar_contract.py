@@ -84,6 +84,32 @@ def test_default_portfolio_reads_cache_and_joins_calendar_events_metadata(monkey
     assert events[0]["heart"] is True
 
 
+def test_default_portfolio_empty_cache_suppresses_legacy_body(monkeypatch):
+    store = {
+        ("users", "u1", "calendarSettings", "default"): {"activePortfolioId": "default"},
+        ("users", "u1", "calendarEvents", "legacy-row"): _cache_event(),
+        ("users", "u1", "calendarCache", "TEST"): {
+            "ticker": "TEST",
+            "events": [],
+        },
+    }
+    monkeypatch.setattr(firestore_client, "get_db", lambda: FakeDb(store))
+
+    assert firestore_client.read_calendar_events("u1") == []
+
+
+def test_default_portfolio_missing_cache_preserves_legacy_body(monkeypatch):
+    store = {
+        ("users", "u1", "calendarSettings", "default"): {"activePortfolioId": "default"},
+        ("users", "u1", "calendarEvents", "legacy-row"): _cache_event(),
+    }
+    monkeypatch.setattr(firestore_client, "get_db", lambda: FakeDb(store))
+
+    events = firestore_client.read_calendar_events("u1")
+
+    assert [(event["ticker"], event["date"]) for event in events] == [("TEST", "2026-08-10")]
+
+
 def test_named_portfolio_uses_namespaced_cache_metadata_and_custom_paths(monkeypatch):
     base = ("users", "u1", "calendarPortfolios", "income")
     store = {
@@ -116,3 +142,18 @@ def test_named_portfolio_uses_namespaced_cache_metadata_and_custom_paths(monkeyp
     assert [(event["id"], event["date"], event["type"]) for event in custom] == [
         ("custom:test", "2026-08-11", "custom")
     ]
+
+
+def test_named_portfolio_empty_cache_stays_empty_and_ignores_root_legacy(monkeypatch):
+    base = ("users", "u1", "calendarPortfolios", "income")
+    store = {
+        ("users", "u1", "calendarSettings", "default"): {"activePortfolioId": "income"},
+        (*base, "calendarCache", "TEST"): {
+            "ticker": "TEST",
+            "events": [],
+        },
+        ("users", "u1", "calendarEvents", "legacy-row"): _cache_event(),
+    }
+    monkeypatch.setattr(firestore_client, "get_db", lambda: FakeDb(store))
+
+    assert firestore_client.read_calendar_events("u1") == []

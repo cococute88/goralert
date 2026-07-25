@@ -290,8 +290,16 @@ def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
     cache_docs = _read_collection(scope["cache"])
 
     cache_events: List[Dict[str, Any]] = []
+    cache_tickers = set()
     for cache_doc in cache_docs:
-        fallback_ticker = str(cache_doc.get("ticker") or cache_doc.get("id") or "")
+        fallback_ticker = str(
+            cache_doc.get("ticker")
+            or cache_doc.get("firestoreDocumentId")
+            or cache_doc.get("id")
+            or ""
+        ).strip().upper()
+        if fallback_ticker:
+            cache_tickers.add(fallback_ticker)
         raw_events = cache_doc.get("events")
         if not isinstance(raw_events, list):
             continue
@@ -311,14 +319,15 @@ def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
         )
         if event is not None
     ]
-    authoritative = select_authoritative_events(cache_events, legacy_events)
+    authoritative = select_authoritative_events(cache_events, legacy_events, cache_tickers)
     joined = join_calendar_metadata(authoritative, metadata)
     logger.info(
         "calendar read success source=calendarEvents portfolio=%s metadata=%d "
-        "cache_documents=%d authoritative=%d join=%d",
+        "cache_documents=%d cache_tickers=%d authoritative=%d join=%d",
         scope["portfolio_id"],
         len(metadata),
         len(cache_docs),
+        len(cache_tickers),
         len(authoritative),
         len(joined),
     )
