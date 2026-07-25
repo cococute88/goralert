@@ -300,3 +300,24 @@ def test_empty_authoritative_cache_does_not_log_or_dispatch():
     assert firestore.logs == {}
     assert push.calls == 0
     assert telegram.calls == 0
+
+
+def test_late_calendar_event_triggers_at_midnight_cron_without_changing_event_date():
+    rows = _resolved([{"canonicalEventId": EVENT["canonicalEventId"]}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+    rule = _rule()
+    rule.trigger.recurrence.time = "23:45"
+
+    result = engine.process_rule(
+        rule,
+        now=datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc),  # 2026-08-11 00:00 KST
+    )
+
+    assert result.status == STATUS_DELIVERED
+    assert result.event_id is not None and "2026-08-10T23:45:00+09:00" in result.event_id
+    assert len(firestore.logs) == 1
+    assert push.calls == telegram.calls == 1

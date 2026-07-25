@@ -198,15 +198,29 @@ def calendar_due_now(
     now: Optional[datetime] = None,
     window_minutes: int = 30,
 ) -> bool:
-    """True when today's calendar-alert wall time is within the due window."""
+    """True when a calendar-alert wall time is within the due window."""
+    return calendar_due_occurrence(recurrence, now, window_minutes) is not None
+
+
+def calendar_due_occurrence(
+    recurrence: Optional[Recurrence],
+    now: Optional[datetime] = None,
+    window_minutes: int = 30,
+) -> Optional[datetime]:
+    """Return the calendar wall-time occurrence in ``[now-window, now]``.
+
+    Building the candidate from ``window_start`` (rather than always from
+    ``now``) preserves late-night occurrences first evaluated after midnight.
+    """
     if recurrence is None or recurrence.kind != "calendar":
-        return False
+        return None
     tz = get_tz(recurrence.tz)
     aware = _ensure_aware(now, tz) if now else datetime.now(tz)
-    hours, minutes = parse_hh_mm(recurrence.time or "09:00")
-    occurrence = aware.replace(hour=hours, minute=minutes, second=0, microsecond=0)
     window_start = aware - timedelta(minutes=max(0, window_minutes))
-    return window_start <= occurrence <= aware
+    occurrence = _at_time(window_start, recurrence.time or DEFAULT_TIME, tz)
+    if occurrence < window_start:
+        occurrence = _at_time(window_start + timedelta(days=1), recurrence.time or DEFAULT_TIME, tz)
+    return occurrence if occurrence <= aware else None
 
 
 def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes: int = 30) -> str:
@@ -220,8 +234,9 @@ def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes:
     if recurrence is not None and recurrence.kind == "calendar":
         tz = get_tz(recurrence.tz)
         aware = _ensure_aware(now, tz)
-        hours, minutes = parse_hh_mm(recurrence.time or "09:00")
-        occurrence = aware.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        occurrence = calendar_due_occurrence(recurrence, aware, window_minutes)
+        if occurrence is None:
+            occurrence = _at_time(aware, recurrence.time or DEFAULT_TIME, tz)
         return occurrence.isoformat()
 
     if recurrence is not None and recurrence.kind not in ("calendar", None):

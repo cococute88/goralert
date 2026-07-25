@@ -17,7 +17,14 @@ from datetime import datetime, timedelta, timezone
 
 from alert_engine.event import make_event_id
 from alert_engine.models import Recurrence, TriggerPolicy
-from alert_engine.recurrence import bucket_time, calendar_due_now, due_now, get_tz, next_occurrence
+from alert_engine.recurrence import (
+    bucket_time,
+    calendar_due_now,
+    calendar_due_occurrence,
+    due_now,
+    get_tz,
+    next_occurrence,
+)
 
 KST = get_tz("Asia/Seoul")
 
@@ -117,3 +124,15 @@ def test_calendar_recurrence_honors_selected_wall_time_and_stable_daily_bucket()
     assert not calendar_due_now(rec, late, window_minutes=30)
     assert bucket_time(due, trigger) == "2026-08-10T09:00:00+09:00"
     assert bucket_time(late, trigger) == "2026-08-10T09:00:00+09:00"
+
+
+def test_calendar_due_window_crossing_midnight_uses_previous_day_occurrence():
+    rec = Recurrence(kind="calendar", tz="Asia/Seoul", time="23:45")
+    trigger = TriggerPolicy(mode="recurring", recurrence=rec)
+    midnight_run = _kst(2026, 8, 11, 0, 0)
+
+    occurrence = calendar_due_occurrence(rec, midnight_run, window_minutes=30)
+
+    assert occurrence == _kst(2026, 8, 10, 23, 45)
+    assert calendar_due_now(rec, midnight_run, window_minutes=30)
+    assert bucket_time(midnight_run, trigger, window_minutes=30) == "2026-08-10T23:45:00+09:00"

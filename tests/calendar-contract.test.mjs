@@ -25,7 +25,12 @@ function loadTsModule(filename, dependencies = {}) {
 }
 
 const calendarContract = loadTsModule("lib/calendar-contract.ts");
-const { resolveGeneratedCalendarEvents } = calendarContract;
+const {
+  calendarIdentityKeys,
+  findMatchingCalendarIdentityKey,
+  normalizeAuthoritativeCalendarEvent,
+  resolveGeneratedCalendarEvents,
+} = calendarContract;
 const { nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
   "@/lib/calendar-contract": calendarContract,
 });
@@ -129,5 +134,23 @@ test("date selector still resolves its next occurrence from calendar events", ()
   assert.equal(
     nextRuleOccurrence(rule, [calendarEvent], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
     "2026-08-10T00:00:00.000Z",
+  );
+});
+
+test("legacy Firestore document identity still matches existing bell marks", () => {
+  const legacy = normalizeAuthoritativeCalendarEvent(
+    {
+      ...event("TEST", "payload-id"),
+      id: undefined,
+      canonicalEventId: "dividend:TEST:buy:2026-08-10",
+      firestoreDocumentId: "legacy-firestore-doc",
+    },
+    "legacy-firestore-doc",
+  );
+  const keys = calendarIdentityKeys(legacy);
+
+  assert.equal(
+    findMatchingCalendarIdentityKey(keys, ["legacy-firestore-doc"]),
+    "legacy-firestore-doc",
   );
 });

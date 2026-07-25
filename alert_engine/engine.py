@@ -43,7 +43,7 @@ from .models import (
     ChannelResult,
     NotificationLog,
 )
-from .recurrence import bucket_time, calendar_due_now, due_now, get_tz, parse_hh_mm
+from .recurrence import bucket_time, calendar_due_occurrence, due_now, get_tz, parse_hh_mm
 
 logger = logging.getLogger("alert_engine.engine")
 
@@ -152,12 +152,15 @@ class AlertEngine:
 
         # 2. recurrence "due now" gate. Calendar rules use the same fixed
         # wall-clock time selected in the UI, while their date comes from data.
+        calendar_occurrence = None
         if recurrence is not None:
-            is_due = (
-                calendar_due_now(recurrence, now, self.config.eval_window_minutes)
-                if recurrence.kind == "calendar"
-                else due_now(recurrence, now, self.config.eval_window_minutes)
-            )
+            if recurrence.kind == "calendar":
+                calendar_occurrence = calendar_due_occurrence(
+                    recurrence, now, self.config.eval_window_minutes,
+                )
+                is_due = calendar_occurrence is not None
+            else:
+                is_due = due_now(recurrence, now, self.config.eval_window_minutes)
             if not is_due:
                 return ProcessResult(rule.id, rule.uid, STATUS_NOT_DUE, "recurrence not due")
 
@@ -169,7 +172,14 @@ class AlertEngine:
             return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"no evaluator for kind={rule.condition.kind}")
 
         prev_value = rule.lastValue if isinstance(rule.lastValue, (int, float)) else None
-        ctx = EvalContext(uid=rule.uid, now=now, prev_value=prev_value, settings=settings)
+        evaluation_now = (
+            calendar_occurrence
+            if calendar_occurrence is not None
+            and rule.condition.kind == "date"
+            and rule.condition.selector is not None
+            else now
+        )
+        ctx = EvalContext(uid=rule.uid, now=evaluation_now, prev_value=prev_value, settings=settings)
         eval_result = evaluator.evaluate(rule, rule.condition, ctx)
         logger.info("rule=%s eval: %s", rule.id, eval_result.detail)
 

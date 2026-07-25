@@ -75,7 +75,7 @@ export async function loadResolvedCalendarEvents(uid: string): Promise<ResolvedC
   const legacyEvents = isDefault
     ? metadataSnap.docs.flatMap((item) => {
         const event = normalizeAuthoritativeCalendarEvent(
-          item.data(),
+          { ...item.data(), firestoreDocumentId: item.id },
           item.id,
           "",
           "calendarEvents",

@@ -75,6 +75,17 @@ export function calendarIdentityKeys(
   return Array.from(keys);
 }
 
+export function findMatchingCalendarIdentityKey(
+  identityKeys: Iterable<string>,
+  candidateIds: Iterable<string>,
+): string | null {
+  const candidates = new Set(Array.from(candidateIds));
+  for (const key of Array.from(identityKeys)) {
+    if (candidates.has(key)) return key;
+  }
+  return null;
+}
+
 export function normalizeAuthoritativeCalendarEvent(
   raw: CalendarRecord,
   fallbackId = "",
