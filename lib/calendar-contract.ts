@@ -177,6 +177,7 @@ function subtractCalendarDay(date: string): string {
 function selectorNotificationDates(
   selector: DateEventSelector,
   events: ResolvedCalendarEvent[],
+  deriveBuyByMinusOne: boolean,
 ): string[] {
   const match = selector.match ?? {};
   const rawTypes = Array.isArray(match.type) ? match.type : match.type ? [match.type] : [];
@@ -199,43 +200,52 @@ function selectorNotificationDates(
     const selectsMinusOne = selectedTypes.has("buy_by_minus_1") && type === "buy_by";
     if (!selectsBody && !selectsMinusOne) continue;
     if (selectsBody) dates.push(event.date);
-    if (selectsMinusOne) dates.push(subtractCalendarDay(event.date));
+    if (selectsMinusOne) {
+      dates.push(deriveBuyByMinusOne ? subtractCalendarDay(event.date) : event.date);
+    }
   }
   return Array.from(new Set(dates.filter(Boolean))).sort();
 }
 
-export function hasCalendarEventSelector(condition: Condition): boolean {
+export function requiresCalendarEvent(condition: Condition): boolean {
   if (
     (condition.kind === "date" || condition.kind === "dividend")
     && Boolean(condition.selector)
   ) return true;
-  return condition.kind === "composite"
-    && condition.conditions.some(hasCalendarEventSelector);
+  if (condition.kind !== "composite" || condition.conditions.length === 0) return false;
+  return condition.operator === "or"
+    ? condition.conditions.every(requiresCalendarEvent)
+    : condition.conditions.some(requiresCalendarEvent);
 }
 
-function conditionNotificationDates(
+function calendarDateConstraint(
   condition: Condition,
   events: ResolvedCalendarEvent[],
-): string[] {
+): string[] | null {
   if (
     (condition.kind === "date" || condition.kind === "dividend")
     && condition.selector
   ) {
-    return selectorNotificationDates(condition.selector, events);
+    return selectorNotificationDates(
+      condition.selector,
+      events,
+      condition.kind === "date",
+    );
   }
-  if (condition.kind !== "composite") return [];
+  if (condition.kind !== "composite" || condition.conditions.length === 0) return null;
 
-  const calendarChildren = condition.conditions.filter(hasCalendarEventSelector);
-  if (calendarChildren.length === 0) return [];
-  const childDates = calendarChildren.map((child) => conditionNotificationDates(child, events));
+  const childDates = condition.conditions.map((child) => calendarDateConstraint(child, events));
   if (condition.operator === "or") {
-    return Array.from(new Set(childDates.flat())).sort();
+    if (childDates.some((dates) => dates === null)) return null;
+    return Array.from(new Set(childDates.flatMap((dates) => dates ?? []))).sort();
   }
-  return childDates
+  const constrainedDates = childDates.filter((dates): dates is string[] => dates !== null);
+  if (constrainedDates.length === 0) return null;
+  return constrainedDates
     .slice(1)
     .reduce(
       (dates, next) => dates.filter((date) => next.includes(date)),
-      childDates[0],
+      constrainedDates[0],
     );
 }
 
@@ -243,5 +253,5 @@ export function calendarNotificationDates(
   rule: AlertRule,
   events: ResolvedCalendarEvent[],
 ): string[] {
-  return conditionNotificationDates(rule.condition, events);
+  return calendarDateConstraint(rule.condition, events) ?? [];
 }

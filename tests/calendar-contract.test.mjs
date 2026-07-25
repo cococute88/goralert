@@ -182,6 +182,48 @@ test("nested composite selector resolves its next calendar occurrence", () => {
   );
 });
 
+test("mixed selector OR metric composite remains a daily schedule", () => {
+  const rule = {
+    ...metricRule("15:35"),
+    id: "mixed-or-composite",
+    kind: "composite",
+    condition: {
+      kind: "composite",
+      operator: "or",
+      conditions: [
+        {
+          kind: "date",
+          selector: { source: "calendarEvents", match: { type: ["buy_by"] } },
+        },
+        metricRule().condition,
+      ],
+    },
+  };
+
+  assert.equal(
+    nextRuleOccurrence(rule, [event("TEST", "cache-test")], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
+    "2026-08-09T06:35:00.000Z",
+  );
+});
+
+test("dividend minus-one selector preview uses the evaluator's raw event date", () => {
+  const rule = {
+    ...metricRule("08:00"),
+    id: "dividend-minus-one-rule",
+    kind: "dividend",
+    condition: {
+      kind: "dividend",
+      ticker: "TEST",
+      selector: { source: "calendarEvents", match: { type: ["buy_by_minus_1"] } },
+    },
+  };
+
+  assert.equal(
+    nextRuleOccurrence(rule, [event("TEST", "cache-test")], new Date("2026-08-08T00:00:00.000Z"))?.toISOString(),
+    "2026-08-09T23:00:00.000Z",
+  );
+});
+
 test("legacy Firestore document identity still matches existing bell marks", () => {
   const legacy = normalizeAuthoritativeCalendarEvent(
     {
