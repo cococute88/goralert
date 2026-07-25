@@ -13,7 +13,7 @@
 // no DST so this is exact. For a hypothetical DST tz the stride is re-resolved
 // per occurrence via zonedTimeToUtc, keeping each fire on the intended wall time.
 
-import { calendarNotificationDates } from "@/lib/calendar-contract";
+import { calendarNotificationDates, hasCalendarEventSelector } from "@/lib/calendar-contract";
 import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
 import type { AlertRule, Recurrence, TriggerPolicy } from "./types";
 
@@ -227,9 +227,7 @@ export function nextRuleOccurrence(
   if (recurrence?.kind !== "calendar") {
     return nextOccurrence(rule.trigger, from);
   }
-  const isCalendarEventRule =
-    (rule.condition.kind === "date" || rule.condition.kind === "dividend")
-    && Boolean(rule.condition.selector);
+  const isCalendarEventRule = hasCalendarEventSelector(rule.condition);
   if (!isCalendarEventRule) {
     // Metric forms reuse the "calendar" recurrence kind for a daily fixed
     // evaluation time. Selector-backed date/dividend rules are driven by

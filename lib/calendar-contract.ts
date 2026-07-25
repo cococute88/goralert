@@ -1,4 +1,4 @@
-import type { AlertRule } from "@/lib/alerts/types";
+import type { AlertRule, Condition, DateEventSelector } from "@/lib/alerts/types";
 import type { CalendarEventMeta, ResolvedCalendarEvent } from "@/lib/calendar-types";
 
 type CalendarRecord = Record<string, unknown>;
@@ -174,15 +174,10 @@ function subtractCalendarDay(date: string): string {
   return parsed.toISOString().slice(0, 10);
 }
 
-export function calendarNotificationDates(
-  rule: AlertRule,
+function selectorNotificationDates(
+  selector: DateEventSelector,
   events: ResolvedCalendarEvent[],
 ): string[] {
-  if (
-    (rule.condition.kind !== "date" && rule.condition.kind !== "dividend")
-    || !rule.condition.selector
-  ) return [];
-  const selector = rule.condition.selector;
   const match = selector.match ?? {};
   const rawTypes = Array.isArray(match.type) ? match.type : match.type ? [match.type] : [];
   const selectedTypes = new Set(
@@ -207,4 +202,46 @@ export function calendarNotificationDates(
     if (selectsMinusOne) dates.push(subtractCalendarDay(event.date));
   }
   return Array.from(new Set(dates.filter(Boolean))).sort();
+}
+
+export function hasCalendarEventSelector(condition: Condition): boolean {
+  if (
+    (condition.kind === "date" || condition.kind === "dividend")
+    && Boolean(condition.selector)
+  ) return true;
+  return condition.kind === "composite"
+    && condition.conditions.some(hasCalendarEventSelector);
+}
+
+function conditionNotificationDates(
+  condition: Condition,
+  events: ResolvedCalendarEvent[],
+): string[] {
+  if (
+    (condition.kind === "date" || condition.kind === "dividend")
+    && condition.selector
+  ) {
+    return selectorNotificationDates(condition.selector, events);
+  }
+  if (condition.kind !== "composite") return [];
+
+  const calendarChildren = condition.conditions.filter(hasCalendarEventSelector);
+  if (calendarChildren.length === 0) return [];
+  const childDates = calendarChildren.map((child) => conditionNotificationDates(child, events));
+  if (condition.operator === "or") {
+    return Array.from(new Set(childDates.flat())).sort();
+  }
+  return childDates
+    .slice(1)
+    .reduce(
+      (dates, next) => dates.filter((date) => next.includes(date)),
+      childDates[0],
+    );
+}
+
+export function calendarNotificationDates(
+  rule: AlertRule,
+  events: ResolvedCalendarEvent[],
+): string[] {
+  return conditionNotificationDates(rule.condition, events);
 }

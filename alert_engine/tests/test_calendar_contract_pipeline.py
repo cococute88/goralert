@@ -9,7 +9,7 @@ import pytest
 from alert_engine.calendar_contract import resolve_calendar_events
 from alert_engine.datasource import AlertDataSource
 from alert_engine.engine import STATUS_DELIVERED, STATUS_NOT_TRIGGERED
-from alert_engine.models import AlertRule, AlertSettings
+from alert_engine.models import AlertRule, AlertSettings, Condition
 
 from .conftest import FakeChannel, FakeFirestore, build_engine
 
@@ -89,6 +89,26 @@ def _dividend_rule(event_type: str = "ex_div") -> AlertRule:
     rule.condition.kind = "dividend"
     rule.condition.ticker = "TEST"
     rule.trigger.recurrence.time = "08:00"
+    return rule
+
+
+def _nested_composite_rule() -> AlertRule:
+    rule = _rule()
+    selector = rule.condition
+    rule.id = "rule-nested-calendar-composite"
+    rule.kind = "composite"
+    rule.condition = Condition(
+        kind="composite",
+        operator="and",
+        conditions=[
+            Condition(
+                kind="composite",
+                operator="or",
+                conditions=[selector],
+            ),
+        ],
+    )
+    rule.trigger.recurrence.time = "23:45"
     return rule
 
 
@@ -352,6 +372,24 @@ def test_dividend_selector_uses_due_occurrence_date_in_recurrence_timezone():
     result = engine.process_rule(
         _dividend_rule(),
         now=datetime(2026, 8, 9, 23, 5, tzinfo=timezone.utc),  # 2026-08-10 08:05 KST
+    )
+
+    assert result.status == STATUS_DELIVERED
+    assert len(firestore.logs) == 1
+    assert push.calls == telegram.calls == 1
+
+
+def test_nested_calendar_selector_uses_prior_due_date_across_midnight():
+    rows = _resolved([{"canonicalEventId": EVENT["canonicalEventId"]}])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+
+    result = engine.process_rule(
+        _nested_composite_rule(),
+        now=datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc),  # 2026-08-11 00:00 KST
     )
 
     assert result.status == STATUS_DELIVERED

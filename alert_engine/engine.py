@@ -41,6 +41,7 @@ from .models import (
     AlertRule,
     AlertSettings,
     ChannelResult,
+    Condition,
     NotificationLog,
 )
 from .recurrence import bucket_time, calendar_due_occurrence, due_now, get_tz, parse_hh_mm
@@ -105,6 +106,12 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return dt
     except Exception:
         return None
+
+
+def _has_calendar_selector(condition: Condition) -> bool:
+    if condition.kind in {"date", "dividend"} and condition.selector is not None:
+        return True
+    return any(_has_calendar_selector(child) for child in condition.conditions)
 
 
 class AlertEngine:
@@ -175,8 +182,7 @@ class AlertEngine:
         evaluation_now = (
             calendar_occurrence
             if calendar_occurrence is not None
-            and rule.condition.kind in {"date", "dividend"}
-            and rule.condition.selector is not None
+            and _has_calendar_selector(rule.condition)
             else now
         )
         ctx = EvalContext(uid=rule.uid, now=evaluation_now, prev_value=prev_value, settings=settings)

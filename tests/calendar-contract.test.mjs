@@ -156,6 +156,32 @@ test("dividend selector resolves its next occurrence from calendar events", () =
   );
 });
 
+test("nested composite selector resolves its next calendar occurrence", () => {
+  const selectorCondition = {
+    kind: "date",
+    selector: { source: "calendarEvents", match: { type: ["buy_by"] } },
+  };
+  const rule = {
+    ...metricRule("23:45"),
+    id: "nested-calendar-composite",
+    kind: "composite",
+    condition: {
+      kind: "composite",
+      operator: "and",
+      conditions: [{
+        kind: "composite",
+        operator: "or",
+        conditions: [selectorCondition],
+      }],
+    },
+  };
+
+  assert.equal(
+    nextRuleOccurrence(rule, [event("TEST", "cache-test")], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
+    "2026-08-10T14:45:00.000Z",
+  );
+});
+
 test("legacy Firestore document identity still matches existing bell marks", () => {
   const legacy = normalizeAuthoritativeCalendarEvent(
     {
