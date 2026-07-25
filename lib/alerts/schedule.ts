@@ -115,6 +115,19 @@ function occurrenceAt(parts: CalendarParts, offsetDays: number, time: string | u
   return zonedTimeToUtc(target.year, target.month, target.day, hours, minutes, tz);
 }
 
+function nextDailyWallClockOccurrence(
+  recurrence: Recurrence,
+  from: Date,
+): Date {
+  const tz = recurrence.tz || DEFAULT_TZ;
+  const fromParts = getDateParts(from, tz);
+  let candidate = occurrenceAt(fromParts, 0, recurrence.time, tz);
+  if (candidate.getTime() < from.getTime()) {
+    candidate = occurrenceAt(fromParts, 1, recurrence.time, tz);
+  }
+  return candidate;
+}
+
 // Computes the next fire time for a recurring trigger, or null when the cadence
 // is event-driven (calendar) or cannot be determined.
 export function nextOccurrence(trigger: TriggerPolicy | undefined, from: Date = new Date()): Date | null {
@@ -210,10 +223,17 @@ export function nextRuleOccurrence(
   events: ResolvedCalendarEvent[],
   from: Date = new Date(),
 ): Date | null {
-  if (rule.trigger.recurrence?.kind !== "calendar") {
+  const recurrence = rule.trigger.recurrence;
+  if (recurrence?.kind !== "calendar") {
     return nextOccurrence(rule.trigger, from);
   }
-  const recurrence = rule.trigger.recurrence;
+  const isCalendarEventRule =
+    rule.condition.kind === "date" && Boolean(rule.condition.selector);
+  if (!isCalendarEventRule) {
+    // Metric forms reuse the "calendar" recurrence kind for a daily fixed
+    // evaluation time. Only date selectors are driven by calendar event dates.
+    return nextDailyWallClockOccurrence(recurrence, from);
+  }
   const tz = recurrence.tz || DEFAULT_TZ;
   const { hours, minutes } = parseHhMm(recurrence.time ?? DEFAULT_TIME);
   const candidates = calendarNotificationDates(rule, events)

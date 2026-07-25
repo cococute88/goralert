@@ -3,8 +3,7 @@ import fs from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 
-function loadCalendarContract() {
-  const filename = "lib/calendar-contract.ts";
+function loadTsModule(filename, dependencies = {}) {
   const source = fs.readFileSync(filename, "utf8");
   const output = ts.transpileModule(source, {
     compilerOptions: {
@@ -14,11 +13,22 @@ function loadCalendarContract() {
     fileName: filename,
   }).outputText;
   const module = { exports: {} };
-  Function("exports", "module", output)(module.exports, module);
+  Function("exports", "module", "require", output)(
+    module.exports,
+    module,
+    (specifier) => {
+      if (specifier in dependencies) return dependencies[specifier];
+      throw new Error(`Unexpected runtime import from ${filename}: ${specifier}`);
+    },
+  );
   return module.exports;
 }
 
-const { resolveGeneratedCalendarEvents } = loadCalendarContract();
+const calendarContract = loadTsModule("lib/calendar-contract.ts");
+const { resolveGeneratedCalendarEvents } = calendarContract;
+const { nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
+  "@/lib/calendar-contract": calendarContract,
+});
 
 function event(ticker, id, date = "2026-08-10") {
   return {
@@ -66,5 +76,58 @@ test("empty and populated cache tickers resolve independently", () => {
       ["TEST", "ABC"],
     ),
     [cacheAbc],
+  );
+});
+
+function metricRule(time = "15:35") {
+  return {
+    id: "metric-rule",
+    uid: "user-1",
+    kind: "rsi",
+    name: "KOSPI RSI",
+    enabled: true,
+    condition: {
+      kind: "rsi",
+      metric: { metric: "rsi", ticker: "KOSPI", period: 14 },
+      comparator: "lte",
+      threshold: 50,
+    },
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "calendar", time, tz: "Asia/Seoul" },
+    },
+    delivery: { channels: ["push"] },
+  };
+}
+
+test("calendar-kind metric rule keeps its next daily fixed evaluation time", () => {
+  const before = new Date("2026-08-10T05:00:00.000Z"); // 14:00 KST
+  const after = new Date("2026-08-10T07:00:00.000Z"); // 16:00 KST
+
+  assert.equal(
+    nextRuleOccurrence(metricRule(), [], before)?.toISOString(),
+    "2026-08-10T06:35:00.000Z",
+  );
+  assert.equal(
+    nextRuleOccurrence(metricRule(), [], after)?.toISOString(),
+    "2026-08-11T06:35:00.000Z",
+  );
+});
+
+test("date selector still resolves its next occurrence from calendar events", () => {
+  const rule = {
+    ...metricRule("09:00"),
+    id: "calendar-rule",
+    kind: "date",
+    condition: {
+      kind: "date",
+      selector: { source: "calendarEvents", match: { type: ["buy_by"] } },
+    },
+  };
+  const calendarEvent = event("TEST", "cache-test");
+
+  assert.equal(
+    nextRuleOccurrence(rule, [calendarEvent], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
+    "2026-08-10T00:00:00.000Z",
   );
 });
