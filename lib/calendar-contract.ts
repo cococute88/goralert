@@ -178,7 +178,10 @@ export function calendarNotificationDates(
   rule: AlertRule,
   events: ResolvedCalendarEvent[],
 ): string[] {
-  if (rule.condition.kind !== "date" || !rule.condition.selector) return [];
+  if (
+    (rule.condition.kind !== "date" && rule.condition.kind !== "dividend")
+    || !rule.condition.selector
+  ) return [];
   const selector = rule.condition.selector;
   const match = selector.match ?? {};
   const rawTypes = Array.isArray(match.type) ? match.type : match.type ? [match.type] : [];

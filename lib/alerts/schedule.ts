@@ -228,10 +228,12 @@ export function nextRuleOccurrence(
     return nextOccurrence(rule.trigger, from);
   }
   const isCalendarEventRule =
-    rule.condition.kind === "date" && Boolean(rule.condition.selector);
+    (rule.condition.kind === "date" || rule.condition.kind === "dividend")
+    && Boolean(rule.condition.selector);
   if (!isCalendarEventRule) {
     // Metric forms reuse the "calendar" recurrence kind for a daily fixed
-    // evaluation time. Only date selectors are driven by calendar event dates.
+    // evaluation time. Selector-backed date/dividend rules are driven by
+    // calendar event dates.
     return nextDailyWallClockOccurrence(recurrence, from);
   }
   const tz = recurrence.tz || DEFAULT_TZ;

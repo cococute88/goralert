@@ -82,6 +82,16 @@ def _rule(
     })
 
 
+def _dividend_rule(event_type: str = "ex_div") -> AlertRule:
+    rule = _rule(event_type=event_type)
+    rule.id = f"rule-dividend-{event_type}"
+    rule.kind = "dividend"
+    rule.condition.kind = "dividend"
+    rule.condition.ticker = "TEST"
+    rule.trigger.recurrence.time = "08:00"
+    return rule
+
+
 def test_metadata_without_date_joins_authoritative_body_by_canonical_id():
     metadata = [{
         "id": "different-firestore-doc-id",
@@ -319,5 +329,31 @@ def test_late_calendar_event_triggers_at_midnight_cron_without_changing_event_da
 
     assert result.status == STATUS_DELIVERED
     assert result.event_id is not None and "2026-08-10T23:45:00+09:00" in result.event_id
+    assert len(firestore.logs) == 1
+    assert push.calls == telegram.calls == 1
+
+
+def test_dividend_selector_uses_due_occurrence_date_in_recurrence_timezone():
+    ex_div = {
+        **EVENT,
+        "id": "dividend:TEST:ex_div:2026-08-10",
+        "canonicalEventId": "dividend:TEST:ex_div:2026-08-10",
+        "legacyEventId": "TEST-ex_div-2026-08-10",
+        "type": "ex_div",
+        "title": "TEST Ex-Dividend",
+    }
+    rows = resolve_calendar_events([ex_div], [], [], ["TEST"])
+    firestore = ContractFirestore(rows)
+    datasource = AlertDataSource(firestore=firestore)
+    push = FakeChannel("push")
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
+
+    result = engine.process_rule(
+        _dividend_rule(),
+        now=datetime(2026, 8, 9, 23, 5, tzinfo=timezone.utc),  # 2026-08-10 08:05 KST
+    )
+
+    assert result.status == STATUS_DELIVERED
     assert len(firestore.logs) == 1
     assert push.calls == telegram.calls == 1

@@ -137,6 +137,25 @@ test("date selector still resolves its next occurrence from calendar events", ()
   );
 });
 
+test("dividend selector resolves its next occurrence from calendar events", () => {
+  const rule = {
+    ...metricRule("08:00"),
+    id: "dividend-calendar-rule",
+    kind: "dividend",
+    condition: {
+      kind: "dividend",
+      ticker: "TEST",
+      selector: { source: "calendarEvents", match: { type: ["buy_by"] } },
+    },
+  };
+  const calendarEvent = event("TEST", "cache-test");
+
+  assert.equal(
+    nextRuleOccurrence(rule, [calendarEvent], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
+    "2026-08-09T23:00:00.000Z",
+  );
+});
+
 test("legacy Firestore document identity still matches existing bell marks", () => {
   const legacy = normalizeAuthoritativeCalendarEvent(
     {

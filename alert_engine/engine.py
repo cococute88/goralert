@@ -175,7 +175,7 @@ class AlertEngine:
         evaluation_now = (
             calendar_occurrence
             if calendar_occurrence is not None
-            and rule.condition.kind == "date"
+            and rule.condition.kind in {"date", "dividend"}
             and rule.condition.selector is not None
             else now
         )
