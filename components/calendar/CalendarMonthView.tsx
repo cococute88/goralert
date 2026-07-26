@@ -330,7 +330,9 @@ export default function CalendarMonthView({
     <div className="space-y-5">
       <div className="flex items-center justify-between gap-3">
         <h1 className="text-lg font-bold text-foreground">캘린더</h1>
-        <Badge tone="accent">이번 달 {monthEvents.length}개</Badge>
+        <Badge tone="accent">
+          {selectedMonth.getMonth() + 1}월 {monthEvents.length}개
+        </Badge>
       </div>
 
       <p className="text-xs text-muted-foreground">
