@@ -28,6 +28,7 @@ import AdvancedTriggerFields from "./AdvancedTriggerFields";
 import SingleCalendarEventForm from "./SingleCalendarEventForm";
 import { buildRule, buildTemplateFromDraft, type FormKind } from "./ruleModel";
 import { ruleFormVisibility, type RuleFormMode } from "./rule-form-mode";
+import { isSingleCalendarEventOccurrenceFuture } from "@/lib/calendar-alerts";
 
 function PerKindForm({ formKind, value, onChange }: { formKind: FormKind } & RuleFormProps) {
   switch (formKind) {
@@ -70,6 +71,12 @@ export default function RuleForm({
   const visibility = ruleFormVisibility(mode);
 
   const handleSave = async () => {
+    if (mode === "single-calendar-event" && !isSingleCalendarEventOccurrenceFuture(draft)) {
+      const message = "선택한 일정의 알림 시각이 이미 지났습니다";
+      setErrors([message]);
+      toast.error(message);
+      return;
+    }
     const rule = buildRule(uid, draft);
     const result = validateAlertRule(rule);
     if (!result.ok) {

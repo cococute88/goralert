@@ -50,19 +50,56 @@ export function calendarSelectorMatchesEvent(
   return marks.length === 0 || marks.some((mark) => Boolean(event[mark]));
 }
 
-function conditionTargetsEvent(condition: Condition, event: AlertableCalendarEvent): boolean {
+function conditionCalendarDates(
+  condition: Condition,
+  events: readonly AlertableCalendarEvent[],
+): Set<string> | null {
+  if ((condition.kind === "date" || condition.kind === "dividend") && condition.selector) {
+    return new Set(
+      events
+        .filter((event) => calendarSelectorMatchesEvent(condition.selector!, event))
+        .map((event) => event.date),
+    );
+  }
+  if (condition.kind !== "composite" || condition.conditions.length === 0) return null;
+  const childDates = condition.conditions.map((child) => conditionCalendarDates(child, events));
+  if (condition.operator === "or") {
+    if (childDates.some((dates) => dates === null)) return null;
+    return new Set(childDates.flatMap((dates) => dates ? Array.from(dates) : []));
+  }
+  const constrained = childDates.filter((dates): dates is Set<string> => dates !== null);
+  if (constrained.length === 0) return null;
+  return new Set(
+    Array.from(constrained[0]).filter(
+      (date) => constrained.slice(1).every((dates) => dates.has(date)),
+    ),
+  );
+}
+
+function conditionTargetsEvent(
+  condition: Condition,
+  event: AlertableCalendarEvent,
+  events: readonly AlertableCalendarEvent[],
+): boolean {
   if ((condition.kind === "date" || condition.kind === "dividend") && condition.selector) {
     return calendarSelectorMatchesEvent(condition.selector, event);
   }
   if (condition.kind !== "composite") return false;
-  return condition.conditions.some((child) => conditionTargetsEvent(child, event));
+  const childTargetsEvent = condition.conditions.some(
+    (child) => conditionTargetsEvent(child, event, events),
+  );
+  if (!childTargetsEvent) return false;
+  if (condition.operator === "or") return true;
+  const allowedDates = conditionCalendarDates(condition, events);
+  return allowedDates === null || allowedDates.has(event.date);
 }
 
 export function alertRuleTargetsCalendarEvent(
   rule: AlertRule,
   event: AlertableCalendarEvent,
+  events: readonly AlertableCalendarEvent[] = [event],
 ): boolean {
-  return rule.enabled && conditionTargetsEvent(rule.condition, event);
+  return rule.enabled && conditionTargetsEvent(rule.condition, event, events);
 }
 
 export function deriveAlertedCalendarEventIds(
@@ -71,7 +108,7 @@ export function deriveAlertedCalendarEventIds(
 ): Set<string> {
   return new Set(
     events
-      .filter((event) => rules.some((rule) => alertRuleTargetsCalendarEvent(rule, event)))
+      .filter((event) => rules.some((rule) => alertRuleTargetsCalendarEvent(rule, event, events)))
       .map((event) => event.eventId),
   );
 }
@@ -128,6 +165,19 @@ export function buildSingleCalendarEventDraft(event: AlertableCalendarEvent): Pa
       },
     },
   };
+}
+
+export function isSingleCalendarEventOccurrenceFuture(
+  draft: Partial<AlertRule>,
+  now = new Date(),
+): boolean {
+  const condition = draft.condition;
+  if (condition?.kind !== "date" || !condition.selector) return false;
+  const date = condition.selector.match?.date?.slice(0, 10) ?? "";
+  const time = draft.trigger?.recurrence?.time ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return false;
+  const seoulNow = new Date(now.getTime() + 9 * 60 * 60 * 1000).toISOString();
+  return `${date}T${time}:00.000Z` > seoulNow;
 }
 
 const EVENT_TYPE_NAMES: Record<string, string> = {

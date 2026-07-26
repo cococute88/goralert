@@ -14,13 +14,16 @@ import { calendarIdentityKeys } from "@/lib/calendar-contract";
 import {
   buildSingleCalendarEventDraft,
   deriveAlertedCalendarEventIds,
+  isSingleCalendarEventOccurrenceFuture,
 } from "@/lib/calendar-alerts";
 import CalendarMonthView, { type CalendarViewEvent } from "@/components/calendar/CalendarMonthView";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import { stashDraft } from "@/components/alerts/draftStore";
+import { useToast } from "@/components/alerts/ui/toast";
 
 export default function GoralertCalendarPage() {
   const router = useRouter();
+  const toast = useToast();
   const { user, loading: authLoading } = useFirebaseAuth();
   const [events, setEvents] = useState<CalendarViewEvent[]>([]);
   const [rules, setRules] = useState<AlertRule[]>([]);
@@ -78,7 +81,12 @@ export default function GoralertCalendarPage() {
   );
 
   const handleCreateAlert = (event: CalendarViewEvent) => {
-    stashDraft(buildSingleCalendarEventDraft(event));
+    const draft = buildSingleCalendarEventDraft(event);
+    if (!isSingleCalendarEventOccurrenceFuture(draft)) {
+      toast.error("이미 지난 일정에는 새 알림을 만들 수 없습니다");
+      return;
+    }
+    stashDraft(draft);
     const returnTo = `/calendar?date=${encodeURIComponent(event.date)}`;
     router.push(`/alerts/new?mode=single-event&returnTo=${encodeURIComponent(returnTo)}`);
   };

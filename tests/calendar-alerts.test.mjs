@@ -168,3 +168,57 @@ test("single-event form removes broad filters while the standard form keeps them
     favoriteAction: true,
   });
 });
+
+test("AND composite bells require every calendar branch to share the evaluation date", () => {
+  const first = event("first", { ticker: "A", date: "2026-07-29" });
+  const differentDate = event("second", { ticker: "B", date: "2026-07-30" });
+  const sameDate = event("third", { ticker: "B", date: "2026-07-29" });
+  const composite = {
+    ...rule("and-rule", { source: "calendarEvents" }),
+    kind: "composite",
+    condition: {
+      kind: "composite",
+      operator: "and",
+      conditions: [
+        { kind: "date", selector: { source: "calendarEvents", match: { eventId: "first" } } },
+        {
+          kind: "date",
+          selector: {
+            source: "calendarEvents",
+            match: { ticker: "B", type: "buy_by" },
+          },
+        },
+      ],
+    },
+  };
+
+  assert.deepEqual(
+    [...alerts.deriveAlertedCalendarEventIds([first, differentDate], [composite])],
+    [],
+  );
+  assert.deepEqual(
+    [...alerts.deriveAlertedCalendarEventIds([first, sameDate], [composite])],
+    ["first", "third"],
+  );
+});
+
+test("single-event occurrence must still be in the future in Asia/Seoul", () => {
+  const selected = event("future", { date: "2026-07-29" });
+  const draft = alerts.buildSingleCalendarEventDraft(selected);
+
+  assert.equal(
+    alerts.isSingleCalendarEventOccurrenceFuture(draft, new Date("2026-07-26T00:00:00.000Z")),
+    true,
+  );
+  assert.equal(
+    alerts.isSingleCalendarEventOccurrenceFuture(draft, new Date("2026-07-29T00:00:01.000Z")),
+    false,
+  );
+  assert.equal(
+    alerts.isSingleCalendarEventOccurrenceFuture(
+      alerts.buildSingleCalendarEventDraft(event("past", { date: "2026-07-25" })),
+      new Date("2026-07-26T00:00:00.000Z"),
+    ),
+    false,
+  );
+});
