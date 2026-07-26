@@ -13,6 +13,10 @@ import type { CalendarEventType } from "@/lib/calendar-types";
 import {
   findMatchingCalendarIdentityKey,
 } from "@/lib/calendar-contract";
+import {
+  buildCalendarDayCellModel,
+  isCustomCalendarDisplayEvent,
+} from "@/lib/calendar-display";
 import { buildMonthGrid, formatIsoDate } from "@/lib/calendar-grid";
 import {
   addCalendarMonths,
@@ -32,6 +36,8 @@ export type CalendarViewEvent = {
   title: string;
   star: boolean;
   heart: boolean;
+  source: "calendarEvents" | "calendarCustomEvents";
+  sourceKind?: string;
   identityKeys: string[];
 };
 
@@ -69,10 +75,6 @@ function formatMonthHeader(month: Date): string {
   return `${month.getFullYear()}년 ${month.getMonth() + 1}월`;
 }
 
-function compactEventLabel(event: CalendarViewEvent): string {
-  return event.ticker || event.title || calendarEventTypeLabel(event.type);
-}
-
 function EventRow({
   event,
   marked,
@@ -86,6 +88,7 @@ function EventRow({
   onToggleBell: () => void;
   onCreateAlert: () => void;
 }) {
+  const custom = isCustomCalendarDisplayEvent(event);
   return (
     <Card>
       <CardSection className="space-y-2 py-3">
@@ -93,7 +96,7 @@ function EventRow({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="truncate text-sm font-semibold text-foreground">
-                {event.ticker || "—"}
+                {custom ? event.title : event.ticker || event.title}
               </span>
               <span
                 className={cx(
@@ -104,7 +107,7 @@ function EventRow({
                 {calendarEventTypeLabel(event.type)}
               </span>
             </div>
-            {event.title ? (
+            {event.title && !custom ? (
               <p className="mt-0.5 truncate text-xs text-muted-foreground">{event.title}</p>
             ) : null}
           </div>
@@ -168,7 +171,8 @@ function MonthCalendar({
       <div className="grid grid-cols-7 gap-1">
         {cells.map((cell) => {
           const dayEvents = cell.isCurrentMonth ? eventsByDate.get(cell.isoDate) ?? [] : [];
-          const firstEvent = dayEvents[0];
+          const cellModel = buildCalendarDayCellModel(dayEvents);
+          const firstCustom = cellModel.customEvents[0];
           const isSelected = cell.isoDate === selectedDate;
           const isToday = cell.isoDate === todayIso;
           const hasBell = dayEvents.some(
@@ -184,7 +188,7 @@ function MonthCalendar({
               aria-current={isToday ? "date" : undefined}
               onClick={() => onSelectDate(cell.date, cell.isoDate, cell.isCurrentMonth)}
               className={cx(
-                "relative flex h-16 min-w-0 flex-col items-start overflow-hidden rounded-lg border px-1.5 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+                "relative flex h-[104px] min-w-0 flex-col items-stretch overflow-hidden rounded-lg border px-1 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
                 cell.isCurrentMonth
                   ? "border-transparent text-foreground hover:bg-muted"
                   : "border-transparent bg-muted/20 text-muted-foreground/40",
@@ -192,26 +196,49 @@ function MonthCalendar({
                 isSelected ? "border-accent bg-accent/10 ring-1 ring-accent" : "",
               )}
             >
-              <span className={cx("text-xs", dayEvents.length ? "font-bold" : "font-medium")}>
-                {cell.day}
-              </span>
-              {hasBell ? (
-                <span
-                  className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-accent"
-                  aria-hidden="true"
-                />
-              ) : null}
-              {firstEvent ? (
+              <div className="flex h-5 min-w-0 shrink-0 items-center gap-0.5">
                 <span
                   className={cx(
-                    "absolute inset-x-0.5 bottom-1 truncate rounded border py-0.5 text-center text-[7.5px] font-semibold leading-none tracking-tight sm:px-0.5 sm:text-[9px]",
-                    typeVisualClass(firstEvent.type),
+                    "shrink-0 text-[11px] font-bold leading-none",
+                    hasBell ? "text-accent" : "",
                   )}
                 >
-                  {compactEventLabel(firstEvent)}
-                  {dayEvents.length > 1 ? ` +${dayEvents.length - 1}` : ""}
+                  {cell.day}
                 </span>
-              ) : null}
+                {firstCustom ? (
+                  <span
+                    className="min-w-0 flex-1 truncate text-[7.5px] font-semibold leading-none text-warning sm:text-[9px]"
+                    title={cellModel.customEvents.map((event) => event.title).join(", ")}
+                  >
+                    {firstCustom.title}
+                  </span>
+                ) : null}
+                {cellModel.customEvents.length > 1 ? (
+                  <span className="shrink-0 text-[7px] font-semibold leading-none text-warning">
+                    +{cellModel.customEvents.length - 1}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-0.5 flex min-h-0 min-w-0 flex-1 flex-col gap-0.5 overflow-hidden">
+                {cellModel.visibleRegularEvents.map((event) => (
+                  <span
+                    key={event.eventId}
+                    title={`${event.ticker} ${calendarEventTypeLabel(event.type)}`.trim()}
+                    className={cx(
+                      "min-w-0 truncate rounded border px-0.5 py-0.5 text-center text-[7.5px] font-semibold leading-none tracking-tight sm:text-[9px]",
+                      typeVisualClass(event.type),
+                    )}
+                  >
+                    {event.star ? "⭐" : event.heart ? "♥" : ""}
+                    {event.ticker || event.title}
+                  </span>
+                ))}
+                {cellModel.regularOverflowCount > 0 ? (
+                  <span className="shrink-0 text-center text-[7px] font-semibold leading-none text-muted-foreground sm:text-[8px]">
+                    외 {cellModel.regularOverflowCount}개
+                  </span>
+                ) : null}
+              </div>
             </button>
           );
         })}

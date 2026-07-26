@@ -12,7 +12,8 @@
     "test:firestore-payload": "node --test tests/firestore-payload.test.mjs",
     "test:push-devices": "node --test tests/push-device-data.test.mjs",
     "test:calendar-contract": "node --test tests/calendar-contract.test.mjs",
-    "test:calendar-view": "node --test tests/calendar-view.test.mjs"
+    "test:calendar-view": "node --test tests/calendar-view.test.mjs",
+    "test:calendar-display": "node --test tests/calendar-display.test.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.0",

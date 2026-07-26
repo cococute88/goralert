@@ -13,7 +13,7 @@ import {
   loadCalendarAlertMarks,
   saveCalendarAlertMark,
 } from "@/lib/alerts/repositories";
-import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
+import { loadCalendarDisplayEvents } from "@/lib/calendar-reader";
 import {
   calendarIdentityKeys,
   findMatchingCalendarIdentityKey,
@@ -28,7 +28,7 @@ import { stashDraft } from "@/components/alerts/draftStore";
 
 function buildCalendarDraft(event: CalendarViewEvent): Partial<AlertRule> {
   const label = calendarEventTypeLabel(event.type);
-  const name = `${event.ticker} ${label}`.trim();
+  const name = event.type === "custom" ? event.title : `${event.ticker} ${label}`.trim();
   return {
     kind: "date",
     name,
@@ -36,7 +36,7 @@ function buildCalendarDraft(event: CalendarViewEvent): Partial<AlertRule> {
     condition: {
       kind: "date",
       selector: {
-        source: "calendarEvents",
+        source: event.source,
         match: {
           ...(event.ticker ? { ticker: event.ticker } : {}),
           ...(event.type ? { type: String(event.type) } : {}),
@@ -73,7 +73,7 @@ export default function GoralertCalendarPage() {
     setLoading(true);
 
     Promise.all([
-      loadResolvedCalendarEvents(user.uid),
+      loadCalendarDisplayEvents(user.uid),
       loadCalendarAlertMarks(user.uid),
     ])
       .then(([calendarEvents, marks]) => {
@@ -87,6 +87,8 @@ export default function GoralertCalendarPage() {
           title: item.title ?? "",
           star: item.star,
           heart: item.heart,
+          source: item.source,
+          sourceKind: item.sourceKind,
           identityKeys: calendarIdentityKeys(item as unknown as Record<string, unknown>),
         }));
 
