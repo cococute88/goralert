@@ -193,6 +193,36 @@ def due_now(
     return window_start <= occ <= now
 
 
+def calendar_due_now(
+    recurrence: Optional[Recurrence],
+    now: Optional[datetime] = None,
+    window_minutes: int = 30,
+) -> bool:
+    """True when a calendar-alert wall time is within the due window."""
+    return calendar_due_occurrence(recurrence, now, window_minutes) is not None
+
+
+def calendar_due_occurrence(
+    recurrence: Optional[Recurrence],
+    now: Optional[datetime] = None,
+    window_minutes: int = 30,
+) -> Optional[datetime]:
+    """Return the calendar wall-time occurrence in ``[now-window, now]``.
+
+    Building the candidate from ``window_start`` (rather than always from
+    ``now``) preserves late-night occurrences first evaluated after midnight.
+    """
+    if recurrence is None or recurrence.kind != "calendar":
+        return None
+    tz = get_tz(recurrence.tz)
+    aware = _ensure_aware(now, tz) if now else datetime.now(tz)
+    window_start = aware - timedelta(minutes=max(0, window_minutes))
+    occurrence = _at_time(window_start, recurrence.time or DEFAULT_TIME, tz)
+    if occurrence < window_start:
+        occurrence = _at_time(window_start + timedelta(days=1), recurrence.time or DEFAULT_TIME, tz)
+    return occurrence if occurrence <= aware else None
+
+
 def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes: int = 30) -> str:
     """Stable ISO bucket string used to build the idempotency eventId.
 
@@ -201,6 +231,14 @@ def bucket_time(now: datetime, trigger: Optional[TriggerPolicy], window_minutes:
     non-scheduled (threshold) rules we bucket ``now`` down to the window grid.
     """
     recurrence = trigger.recurrence if trigger else None
+    if recurrence is not None and recurrence.kind == "calendar":
+        tz = get_tz(recurrence.tz)
+        aware = _ensure_aware(now, tz)
+        occurrence = calendar_due_occurrence(recurrence, aware, window_minutes)
+        if occurrence is None:
+            occurrence = _at_time(aware, recurrence.time or DEFAULT_TIME, tz)
+        return occurrence.isoformat()
+
     if recurrence is not None and recurrence.kind not in ("calendar", None):
         tz = get_tz(recurrence.tz)
         aware = _ensure_aware(now, tz)

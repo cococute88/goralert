@@ -9,6 +9,8 @@ import { useRouter } from "next/navigation";
 import { Copy, Loader2, Pencil, Plus, Send, Star, Trash2 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule } from "@/lib/alerts/types";
+import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
+import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
 import {
   deleteAlertRule,
   enqueueTestPushRequest,
@@ -18,7 +20,7 @@ import {
 } from "@/lib/alerts/repositories";
 import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
 import { cloneRuleToDraft } from "@/lib/alerts/clone";
-import { formatNextOccurrence, nextOccurrence } from "@/lib/alerts/schedule";
+import { formatNextOccurrence, nextRuleOccurrence } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, ConfirmDialog, EmptyState, Toggle } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
@@ -28,10 +30,12 @@ import { stashDraft } from "@/components/alerts/draftStore";
 function RuleCard({
   rule,
   uid,
+  calendarEvents,
   onChanged,
 }: {
   rule: AlertRule;
   uid: string;
+  calendarEvents: ResolvedCalendarEvent[];
   onChanged: () => void;
 }) {
   const router = useRouter();
@@ -42,7 +46,7 @@ function RuleCard({
   const [busy, setBusy] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  const next = nextOccurrence(rule.trigger);
+  const next = nextRuleOccurrence(rule, calendarEvents);
 
   const handleToggle = async (value: boolean) => {
     setEnabled(value);
@@ -121,7 +125,11 @@ function RuleCard({
               <AlertKindBadge kind={rule.kind} />
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              다음 예정: {next ? formatNextOccurrence(next) : "캘린더/이벤트 기반"}
+              다음 예정: {next
+                ? formatNextOccurrence(next)
+                : rule.trigger.recurrence?.kind === "calendar"
+                  ? "해당 조건의 예정 일정 없음"
+                  : "조건 충족 시"}
             </p>
             <p className="text-[11px] text-muted-foreground">
               마지막 발송: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleString("ko-KR") : "없음"}
@@ -173,6 +181,7 @@ function RuleCard({
 export default function AlertsListPage() {
   const { user, loading: authLoading } = useFirebaseAuth();
   const [rules, setRules] = useState<AlertRule[]>([]);
+  const [calendarEvents, setCalendarEvents] = useState<ResolvedCalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -182,12 +191,21 @@ export default function AlertsListPage() {
     if (!user) return;
     let active = true;
     setLoading(true);
-    loadAlertRules(user.uid)
-      .then((rows) => {
-        if (active) setRules(rows);
+    Promise.allSettled([loadAlertRules(user.uid), loadResolvedCalendarEvents(user.uid)])
+      .then(([rulesResult, calendarResult]) => {
+        if (active) {
+          setRules(rulesResult.status === "fulfilled" ? rulesResult.value : []);
+          setCalendarEvents(calendarResult.status === "fulfilled" ? calendarResult.value : []);
+          if (calendarResult.status === "rejected") {
+            console.error("[calendar-contract] next-occurrence read failed", calendarResult.reason);
+          }
+        }
       })
       .catch(() => {
-        if (active) setRules([]);
+        if (active) {
+          setRules([]);
+          setCalendarEvents([]);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -230,7 +248,13 @@ export default function AlertsListPage() {
       ) : (
         <div className="space-y-3">
           {rules.map((rule) => (
-            <RuleCard key={rule.id} rule={rule} uid={user.uid} onChanged={refresh} />
+            <RuleCard
+              key={rule.id}
+              rule={rule}
+              uid={user.uid}
+              calendarEvents={calendarEvents}
+              onChanged={refresh}
+            />
           ))}
         </div>
       )}

@@ -9,8 +9,10 @@ import Link from "next/link";
 import { Bell, CalendarClock, Plus, Send } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule, NotificationLog } from "@/lib/alerts/types";
+import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
+import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
 import { loadAlertRules, loadNotificationLogs } from "@/lib/alerts/repositories";
-import { formatNextOccurrence, nextOccurrence } from "@/lib/alerts/schedule";
+import { formatNextOccurrence, nextRuleOccurrence } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, EmptyState } from "@/components/alerts/ui";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import AlertKindBadge from "@/components/alerts/forms/AlertKindBadge";
@@ -42,7 +44,7 @@ function RuleRow({ rule, next }: RuleWithNext) {
               <AlertKindBadge kind={rule.kind} />
             </span>
             <span className="mt-0.5 block text-xs text-muted-foreground">
-              {next ? formatNextOccurrence(next) : "캘린더/이벤트 기반"}
+              {next ? formatNextOccurrence(next) : "해당 조건의 예정 일정 없음"}
             </span>
           </span>
         </CardSection>
@@ -55,22 +57,32 @@ export default function GoralertHome() {
   const { user, loading: authLoading } = useFirebaseAuth();
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [logs, setLogs] = useState<NotificationLog[]>([]);
+  const [calendarEvents, setCalendarEvents] = useState<ResolvedCalendarEvent[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!user) return;
     let active = true;
     setLoading(true);
-    Promise.all([loadAlertRules(user.uid), loadNotificationLogs(user.uid, { limit: 5 })])
-      .then(([nextRules, nextLogs]) => {
+    Promise.allSettled([
+      loadAlertRules(user.uid),
+      loadNotificationLogs(user.uid, { limit: 5 }),
+      loadResolvedCalendarEvents(user.uid),
+    ])
+      .then(([rulesResult, logsResult, calendarResult]) => {
         if (!active) return;
-        setRules(nextRules);
-        setLogs(nextLogs);
+        setRules(rulesResult.status === "fulfilled" ? rulesResult.value : []);
+        setLogs(logsResult.status === "fulfilled" ? logsResult.value : []);
+        setCalendarEvents(calendarResult.status === "fulfilled" ? calendarResult.value : []);
+        if (calendarResult.status === "rejected") {
+          console.error("[calendar-contract] dashboard read failed", calendarResult.reason);
+        }
       })
       .catch(() => {
         if (!active) return;
         setRules([]);
         setLogs([]);
+        setCalendarEvents([]);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -83,22 +95,21 @@ export default function GoralertHome() {
   const { todayRules, upcomingRules } = useMemo(() => {
     const now = new Date();
     const enabled = rules.filter((rule) => rule.enabled);
-    const withNext: RuleWithNext[] = enabled.map((rule) => ({ rule, next: nextOccurrence(rule.trigger, now) }));
+    const withNext: RuleWithNext[] = enabled.map((rule) => ({
+      rule,
+      next: nextRuleOccurrence(rule, calendarEvents, now),
+    }));
 
     // "오늘 예정" = 다음 발송 시각이 오늘로 계산되는 (예측 가능한) 룰만.
     const today = withNext.filter((item) => item.next !== null && isSameDay(item.next, now));
 
-    // "다음 예정" = (1) 미래의 예약 룰을 시각순으로, 이어서 (2) 캘린더/이벤트 기반
-    // 룰(다음 시각 예측 불가 → next=null). 캘린더 룰을 "오늘"로 오분류하지 않으면서도
-    // 대시보드에서 사라지지 않도록 여기서 정직한 라벨("캘린더/이벤트 기반")로 노출한다.
+    // "다음 예정"은 고정 반복과 실제 resolve된 캘린더 일정만 포함한다.
     const scheduledUpcoming = withNext
       .filter((item) => item.next && !isSameDay(item.next, now) && item.next.getTime() > now.getTime())
       .sort((a, b) => a.next!.getTime() - b.next!.getTime())
       .slice(0, 5);
-    const calendarDriven = withNext.filter((item) => item.next === null).slice(0, 5);
-
-    return { todayRules: today, upcomingRules: [...scheduledUpcoming, ...calendarDriven] };
-  }, [rules]);
+    return { todayRules: today, upcomingRules: scheduledUpcoming };
+  }, [calendarEvents, rules]);
 
   if (authLoading) return <LoadingState />;
   if (!user) return <NoUserState />;

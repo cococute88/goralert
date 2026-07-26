@@ -13,7 +13,9 @@
 // no DST so this is exact. For a hypothetical DST tz the stride is re-resolved
 // per occurrence via zonedTimeToUtc, keeping each fire on the intended wall time.
 
-import type { Recurrence, TriggerPolicy } from "./types";
+import { calendarNotificationDates, requiresCalendarEvent } from "@/lib/calendar-contract";
+import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
+import type { AlertRule, Recurrence, TriggerPolicy } from "./types";
 
 const DEFAULT_TZ = "Asia/Seoul";
 const DEFAULT_TIME = "09:00";
@@ -113,6 +115,19 @@ function occurrenceAt(parts: CalendarParts, offsetDays: number, time: string | u
   return zonedTimeToUtc(target.year, target.month, target.day, hours, minutes, tz);
 }
 
+function nextDailyWallClockOccurrence(
+  recurrence: Recurrence,
+  from: Date,
+): Date {
+  const tz = recurrence.tz || DEFAULT_TZ;
+  const fromParts = getDateParts(from, tz);
+  let candidate = occurrenceAt(fromParts, 0, recurrence.time, tz);
+  if (candidate.getTime() < from.getTime()) {
+    candidate = occurrenceAt(fromParts, 1, recurrence.time, tz);
+  }
+  return candidate;
+}
+
 // Computes the next fire time for a recurring trigger, or null when the cadence
 // is event-driven (calendar) or cannot be determined.
 export function nextOccurrence(trigger: TriggerPolicy | undefined, from: Date = new Date()): Date | null {
@@ -199,6 +214,37 @@ export function nextOccurrence(trigger: TriggerPolicy | undefined, from: Date = 
       // Event-driven (driven by calendar data) — not predictable here.
       return null;
   }
+}
+
+// Resolve an event-driven calendar rule against the same joined event contract
+// used by the Python engine. Other rule kinds keep the existing recurrence path.
+export function nextRuleOccurrence(
+  rule: AlertRule,
+  events: ResolvedCalendarEvent[],
+  from: Date = new Date(),
+): Date | null {
+  const recurrence = rule.trigger.recurrence;
+  if (recurrence?.kind !== "calendar") {
+    return nextOccurrence(rule.trigger, from);
+  }
+  const isCalendarEventRule = requiresCalendarEvent(rule.condition);
+  if (!isCalendarEventRule) {
+    // Metric forms reuse the "calendar" recurrence kind for a daily fixed
+    // evaluation time. Selector-backed date/dividend rules are driven by
+    // calendar event dates.
+    return nextDailyWallClockOccurrence(recurrence, from);
+  }
+  const tz = recurrence.tz || DEFAULT_TZ;
+  const { hours, minutes } = parseHhMm(recurrence.time ?? DEFAULT_TIME);
+  const candidates = calendarNotificationDates(rule, events)
+    .map((date) => {
+      const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+      if (!match) return null;
+      return zonedTimeToUtc(Number(match[1]), Number(match[2]), Number(match[3]), hours, minutes, tz);
+    })
+    .filter((date): date is Date => date !== null && date.getTime() >= from.getTime())
+    .sort((a, b) => a.getTime() - b.getTime());
+  return candidates[0] ?? null;
 }
 
 // True when the next occurrence falls on the same calendar day as `from`,

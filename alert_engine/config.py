@@ -28,7 +28,7 @@ from typing import Optional
 
 # Bumped whenever evaluation/delivery semantics change. Stamped onto rules and
 # notification logs so history + backtests are reproducible.
-ENGINE_VERSION = "2.0.0"
+ENGINE_VERSION = "2.1.0"
 
 # Default timezone for recurrence/quiet-hours interpretation (US requirement).
 DEFAULT_TZ = os.environ.get("DEFAULT_TZ", "Asia/Seoul")

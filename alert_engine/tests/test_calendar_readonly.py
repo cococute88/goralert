@@ -21,8 +21,8 @@ from .conftest import (
     make_calendar_date_rule,
 )
 
-# 2024-05-01 03:00 UTC == 12:00 KST; evaluation date is 2024-05-01.
-NOW = datetime(2024, 5, 1, 3, 0, tzinfo=timezone.utc)
+# 2024-05-01 00:05 UTC == 09:05 KST; inside the 09:00 calendar due window.
+NOW = datetime(2024, 5, 1, 0, 5, tzinfo=timezone.utc)
 TODAY = "2024-05-01"
 
 

@@ -50,11 +50,11 @@ def _process(event_date: str, event_types: list[str], now: datetime, rule_id: st
     ("source_date", "notification_now"),
     [
         # 2026-07-27 is Monday; the alert must remain on Sunday, not Friday.
-        ("2026-07-27", datetime(2026, 7, 25, 15, 30, tzinfo=timezone.utc)),
+        ("2026-07-27", datetime(2026, 7, 26, 0, 5, tzinfo=timezone.utc)),
         # Calendar month boundary: 2026-08-01 -> 2026-07-31.
-        ("2026-08-01", datetime(2026, 7, 30, 15, 30, tzinfo=timezone.utc)),
+        ("2026-08-01", datetime(2026, 7, 31, 0, 5, tzinfo=timezone.utc)),
         # Calendar year boundary: 2027-01-01 -> 2026-12-31.
-        ("2027-01-01", datetime(2026, 12, 30, 15, 30, tzinfo=timezone.utc)),
+        ("2027-01-01", datetime(2026, 12, 31, 0, 5, tzinfo=timezone.utc)),
     ],
 )
 def test_buy_by_minus_one_uses_exact_calendar_day_in_seoul_timezone(source_date, notification_now):
@@ -66,8 +66,8 @@ def test_buy_by_minus_one_uses_exact_calendar_day_in_seoul_timezone(source_date,
 
 def test_buy_by_and_buy_by_minus_one_are_independent_and_can_both_fire():
     source_date = "2026-07-27"  # Monday
-    sunday_now = datetime(2026, 7, 25, 15, 30, tzinfo=timezone.utc)  # Sunday 00:30 KST
-    monday_now = datetime(2026, 7, 26, 15, 30, tzinfo=timezone.utc)  # Monday 00:30 KST
+    sunday_now = datetime(2026, 7, 26, 0, 5, tzinfo=timezone.utc)  # Sunday 09:05 KST
+    monday_now = datetime(2026, 7, 27, 0, 5, tzinfo=timezone.utc)  # Monday 09:05 KST
 
     # Existing buy-by selection remains on the original date.
     direct_sunday, _ = _process(source_date, ["buy_by"], sunday_now, "direct-sunday")

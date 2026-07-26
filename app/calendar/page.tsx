@@ -2,8 +2,8 @@
 
 // GORALERT-ALERT-SYSTEM Layer B2 (REQ-043 / REQ-047)
 // 캘린더 탭. 기존 Gorani 캘린더 데이터를 읽기 전용으로 재사용한다.
-//   - loadLegacyImportedCalendarEvents + loadCalendarCustomEvents 로 일정을 모으고
-//   - loadCalendarEventMetas 의 ⭐(star)/❤️(heart) 표시를 읽기 전용으로 붙인다.
+//   - loadResolvedCalendarEvents 로 cache/legacy/custom 본문과 metadata를 결합하고
+//   - 결합된 ⭐(star)/❤️(heart) 표시를 읽기 전용으로 보여준다.
 //   - 🔔(bell) 표시만 고라알림 소유 컬렉션(users/{uid}/calendarAlertMarks)에 쓴다.
 // ⭐/❤️ 및 기존 캘린더 컬렉션에는 절대 쓰지 않는다 (READ-ONLY).
 //
@@ -24,11 +24,12 @@ import {
   saveCalendarAlertMark,
 } from "@/lib/alerts/repositories";
 import {
-  loadCalendarCustomEvents,
-  loadCalendarEventMetas,
-  loadLegacyImportedCalendarEvents,
+  loadResolvedCalendarEvents,
 } from "@/lib/calendar-reader";
-import type { CalendarEventMeta } from "@/lib/calendar-types";
+import {
+  calendarIdentityKeys,
+  findMatchingCalendarIdentityKey,
+} from "@/lib/calendar-contract";
 import type { CalendarEventType } from "@/lib/calendar-types";
 import { buildMonthGrid, formatIsoDate } from "@/lib/calendar-grid";
 import { getEventVisual, EVENT_VISUALS } from "@/lib/event-visuals";
@@ -46,6 +47,7 @@ type DerivedCalendarEvent = {
   title: string;
   star: boolean; // ⭐ READ-ONLY (event meta)
   heart: boolean; // ❤️ READ-ONLY (event meta)
+  identityKeys: string[];
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -79,11 +81,6 @@ function formatDateHeader(date: string): string {
   const parsed = new Date(`${date}T00:00:00`);
   if (!Number.isFinite(parsed.getTime())) return date;
   return DATE_HEADER.format(parsed);
-}
-
-// ⭐/❤️ 표시는 event meta(eventId 기준)에서 읽기 전용으로 가져온다.
-function metaMark(meta: CalendarEventMeta | undefined): { star: boolean; heart: boolean } {
-  return { star: Boolean(meta?.star), heart: Boolean(meta?.heart) };
 }
 
 // 캘린더 항목 → 날짜 기반(date) 새 알림 draft. new 페이지가 takeDraft 로 소비한다.
@@ -251,46 +248,22 @@ export default function GoralertCalendarPage() {
     setLoading(true);
 
     Promise.all([
-      loadLegacyImportedCalendarEvents(user.uid),
-      loadCalendarCustomEvents(user.uid),
-      loadCalendarEventMetas(user.uid),
+      loadResolvedCalendarEvents(user.uid),
       loadCalendarAlertMarks(user.uid),
     ])
-      .then(([legacy, custom, metas, marks]) => {
+      .then(([calendarEvents, marks]) => {
         if (!active) return;
 
-        const metaById = new Map<string, CalendarEventMeta>();
-        for (const meta of metas) {
-          if (meta?.eventId) metaById.set(meta.eventId, meta);
-        }
-
-        const derived: DerivedCalendarEvent[] = [];
-
-        for (const item of legacy) {
-          const { star, heart } = metaMark(metaById.get(item.id));
-          derived.push({
+        const derived: DerivedCalendarEvent[] = calendarEvents.map((item) => ({
             eventId: item.id,
             date: item.date,
             ticker: item.ticker,
             type: item.type,
             title: item.title ?? "",
-            star,
-            heart,
-          });
-        }
-
-        for (const item of custom) {
-          const { star, heart } = metaMark(metaById.get(item.id));
-          derived.push({
-            eventId: item.id,
-            date: item.date,
-            ticker: item.ticker ?? "",
-            type: item.type,
-            title: item.title,
-            star,
-            heart,
-          });
-        }
+            star: item.star,
+            heart: item.heart,
+            identityKeys: calendarIdentityKeys(item as unknown as Record<string, unknown>),
+          }));
 
         derived.sort(
           (a, b) =>
@@ -363,25 +336,26 @@ export default function GoralertCalendarPage() {
   const bellDates = useMemo(() => {
     const set = new Set<string>();
     for (const event of events) {
-      if (bellIds.has(event.eventId)) set.add(event.date);
+      if (findMatchingCalendarIdentityKey(event.identityKeys, bellIds)) set.add(event.date);
     }
     return set;
   }, [events, bellIds]);
 
   const handleToggleBell = async (event: DerivedCalendarEvent) => {
     if (!user) return;
-    const marked = bellIds.has(event.eventId);
+    const existingMarkId = findMatchingCalendarIdentityKey(event.identityKeys, bellIds);
+    const marked = existingMarkId !== null;
     setBusyId(event.eventId);
 
     // 낙관적 업데이트
     const nextIds = new Set(bellIds);
-    if (marked) nextIds.delete(event.eventId);
+    if (existingMarkId) nextIds.delete(existingMarkId);
     else nextIds.add(event.eventId);
     setBellIds(nextIds);
 
     try {
       if (marked) {
-        await deleteCalendarAlertMark(user.uid, event.eventId);
+        await deleteCalendarAlertMark(user.uid, existingMarkId);
         toast.success("알림 표시를 해제했어요");
       } else {
         const mark: CalendarAlertMark = {
@@ -444,7 +418,7 @@ export default function GoralertCalendarPage() {
                         <EventRow
                           key={event.eventId}
                           event={event}
-                          marked={bellIds.has(event.eventId)}
+                          marked={findMatchingCalendarIdentityKey(event.identityKeys, bellIds) !== null}
                           busy={busyId === event.eventId}
                           onToggleBell={() => handleToggleBell(event)}
                           onCreateAlert={() => handleCreateAlert(event)}

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .models import DateEventSelector, MetricId
+from .calendar_contract import normalize_calendar_event_type
 from .rsi import compute_rsi
 
 logger = logging.getLogger("alert_engine.datasource")
@@ -74,10 +75,11 @@ class AlertDataSource:
     within a single engine run. Inject ``now_fn`` for deterministic tests.
     """
 
-    def __init__(self, now_fn=None, history_period: str = "6mo"):
+    def __init__(self, now_fn=None, history_period: str = "6mo", firestore=None):
         self._now_fn = now_fn
         self._history_period = history_period
         self._close_cache: Dict[str, Any] = {}
+        self._firestore = firestore
 
     # --- time ----------------------------------------------------------------
 
@@ -240,6 +242,8 @@ class AlertDataSource:
         ``firestore`` is the firestore_client module (injected for testability).
         """
         if firestore is None:
+            firestore = self._firestore
+        if firestore is None:
             from . import firestore_client as firestore  # lazy import
 
         source = selector.source if selector and selector.source else "calendarEvents"
@@ -249,11 +253,15 @@ class AlertDataSource:
             else:
                 events = firestore.read_calendar_events(uid)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("calendar read failed for uid=%s (%s)", uid, exc)
+            logger.warning("calendar read failure source=%s (%s)", source, exc)
             return []
 
         match = (selector.match if selector else None) or {}
         mark_filter = (selector.markFilter if selector else None) or []
+        # Custom events do not have Gorani star/heart metadata. Older rules can
+        # retain the form's former default marks after switching the source.
+        if source == "calendarCustomEvents":
+            mark_filter = []
 
         result: List[Dict[str, Any]] = []
         for event in events:
@@ -262,6 +270,13 @@ class AlertDataSource:
             if mark_filter and not self._event_has_mark(event, mark_filter):
                 continue
             result.append(event)
+        logger.info(
+            "calendar selector source=%s read=%d filtered=%d markFilter=%s",
+            source,
+            len(events),
+            len(result),
+            mark_filter,
+        )
         return result
 
     @staticmethod
@@ -280,17 +295,13 @@ class AlertDataSource:
             # DateEvaluator derives the notification date one calendar day
             # earlier. Keep existing rules functional while new rules write
             # canonical selector codes.
-            aliases = {
-                "ex-dividend": "ex_div",
-                "buy-deadline": "buy_by",
-                "buy_by_minus_1": "buy_by",
-            }
             accepted_types = {
-                aliases.get(str(item).strip(), str(item).strip())
+                "buy_by" if normalize_calendar_event_type(item) == "buy_by_minus_1"
+                else normalize_calendar_event_type(item)
                 for item in raw_types
                 if str(item).strip()
             }
-            if accepted_types and str(event.get("type", "")) not in accepted_types:
+            if accepted_types and normalize_calendar_event_type(event.get("type")) not in accepted_types:
                 return False
         contains = match.get("titleContains")
         if isinstance(contains, str) and contains.strip():
@@ -301,7 +312,7 @@ class AlertDataSource:
 
     @staticmethod
     def _event_has_mark(event: Dict[str, Any], mark_filter: List[str]) -> bool:
-        """star/heart flags live on calendarEvents meta as booleans."""
+        """Selected marks use the existing Gorani UI contract: logical OR."""
         for mark in mark_filter:
             if mark == "star" and bool(event.get("star")):
                 return True

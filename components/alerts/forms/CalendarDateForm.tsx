@@ -87,7 +87,16 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
   return (
     <div className="space-y-3">
       <Field label="캘린더 소스">
-        <Select value={selector.source} onChange={(e) => updateSelector({ source: e.target.value as DateEventSelector["source"] })}>
+        <Select
+          value={selector.source}
+          onChange={(e) => {
+            const source = e.target.value as DateEventSelector["source"];
+            updateSelector({
+              source,
+              ...(source === "calendarCustomEvents" ? { markFilter: [] } : {}),
+            });
+          }}
+        >
           {SOURCE_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
@@ -96,26 +105,28 @@ export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
         </Select>
       </Field>
 
-      <Field label="표시 필터" hint="선택한 표시가 있는 종목만 알림 대상이 됩니다.">
-        <div className="flex gap-2">
-          {(["star", "heart"] as CalendarMark[]).map((mark) => {
-            const active = marks.includes(mark);
-            return (
-              <button
-                key={mark}
-                type="button"
-                onClick={() => toggleMark(mark)}
-                aria-pressed={active}
-                className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
-                  active ? "border-accent bg-accent/10 text-foreground" : "border-border bg-background text-muted-foreground"
-                }`}
-              >
-                {mark === "star" ? "⭐ 별표" : "❤️ 하트"}
-              </button>
-            );
-          })}
-        </div>
-      </Field>
+      {selector.source === "calendarEvents" ? (
+        <Field label="표시 필터" hint="선택한 표시 중 하나 이상이 있는 종목만 알림 대상이 됩니다.">
+          <div className="flex gap-2">
+            {(["star", "heart"] as CalendarMark[]).map((mark) => {
+              const active = marks.includes(mark);
+              return (
+                <button
+                  key={mark}
+                  type="button"
+                  onClick={() => toggleMark(mark)}
+                  aria-pressed={active}
+                  className={`flex-1 rounded-xl border px-3 py-2 text-sm ${
+                    active ? "border-accent bg-accent/10 text-foreground" : "border-border bg-background text-muted-foreground"
+                  }`}
+                >
+                  {mark === "star" ? "⭐ 별표" : "❤️ 하트"}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+      ) : null}
 
       <Field label="이벤트 종류" hint="복수 선택할 수 있습니다. 선택하지 않으면 모든 일정 종류가 대상입니다.">
         <div className="flex flex-wrap gap-2">
