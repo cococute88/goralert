@@ -4,6 +4,7 @@ export const MANUAL_CALENDAR_TICKERS_VERSION = 2;
 
 export type CalendarDisplayTickerSource =
   | "manual"
+  | "portfolio-events"
   | "legacy-portfolios"
   | "legacy-events"
   | "legacy-memos"
@@ -12,6 +13,7 @@ export type CalendarDisplayTickerSource =
 export type CalendarDisplayTickerUniverseInput = {
   portfolioId: string;
   manualOverride?: unknown;
+  portfolioEventTickers?: readonly string[];
   legacyPortfolioTickers?: readonly string[];
   legacyEventTickers?: readonly string[];
   legacyMemoKeys?: readonly string[];
@@ -67,10 +69,20 @@ export function uniqueCalendarDisplayTickers(values: readonly string[]): string[
   return tickers;
 }
 
-function validManualTickerOverride(value: unknown, namedPortfolio: boolean): string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+type ManualTickerOverride = {
+  valid: boolean;
+  tickers: string[];
+};
+
+function readManualTickerOverride(
+  value: unknown,
+  namedPortfolio: boolean,
+): ManualTickerOverride {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { valid: false, tickers: [] };
+  }
   const record = value as Record<string, unknown>;
-  if (!Array.isArray(record.tickers)) return [];
+  if (!Array.isArray(record.tickers)) return { valid: false, tickers: [] };
   if (
     !namedPortfolio
     && (
@@ -78,17 +90,25 @@ function validManualTickerOverride(value: unknown, namedPortfolio: boolean): str
       || typeof record.version !== "number"
       || record.version < MANUAL_CALENDAR_TICKERS_VERSION
     )
-  ) return [];
-  return uniqueCalendarDisplayTickers(record.tickers.map(String));
+  ) return { valid: false, tickers: [] };
+  return {
+    valid: true,
+    tickers: uniqueCalendarDisplayTickers(record.tickers.map(String)),
+  };
 }
 
 export function resolveCalendarDisplayTickerUniverse(
   input: CalendarDisplayTickerUniverseInput,
 ): CalendarDisplayTickerUniverse {
   const namedPortfolio = input.portfolioId !== DEFAULT_CALENDAR_PORTFOLIO_ID;
-  const manual = validManualTickerOverride(input.manualOverride, namedPortfolio);
-  if (manual.length > 0) return { source: "manual", tickers: manual };
-  if (namedPortfolio) return { source: "empty", tickers: [] };
+  const manual = readManualTickerOverride(input.manualOverride, namedPortfolio);
+  if (manual.valid) return { source: "manual", tickers: manual.tickers };
+  if (namedPortfolio) {
+    const portfolioEvents = uniqueCalendarDisplayTickers(input.portfolioEventTickers ?? []);
+    return portfolioEvents.length > 0
+      ? { source: "portfolio-events", tickers: portfolioEvents }
+      : { source: "empty", tickers: [] };
+  }
 
   const legacyPortfolios = uniqueCalendarDisplayTickers(input.legacyPortfolioTickers ?? []);
   if (legacyPortfolios.length > 0) {
@@ -110,6 +130,18 @@ export function isCustomCalendarDisplayEvent(event: CalendarDisplayEventLike): b
     || event.source === "calendarCustomEvents"
     || event.sourceKind === "custom"
   );
+}
+
+export function buildCalendarDisplayAlertMatch(
+  event: CalendarDisplayEventLike,
+): { ticker?: string; type?: string; titleContains?: string } {
+  const ticker = normalizeTicker(event.ticker);
+  const title = String(event.title ?? "").trim();
+  return {
+    ...(ticker ? { ticker } : {}),
+    ...(event.type ? { type: event.type } : {}),
+    ...(isCustomCalendarDisplayEvent(event) && title ? { titleContains: title } : {}),
+  };
 }
 
 function displayIdentity(event: CalendarDisplayEventLike): string {

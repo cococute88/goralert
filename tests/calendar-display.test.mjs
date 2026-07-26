@@ -26,6 +26,7 @@ function loadTsModule(filename) {
 const {
   MANUAL_CALENDAR_TICKERS_SOURCE,
   MANUAL_CALENDAR_TICKERS_VERSION,
+  buildCalendarDisplayAlertMatch,
   buildCalendarDayCellModel,
   filterCalendarDisplayEvents,
   resolveCalendarDisplayTickerUniverse,
@@ -98,11 +99,43 @@ test("named portfolios use only their namespaced ticker settings", () => {
   });
   assert.deepEqual(named, { source: "manual", tickers: ["BXSL", "FEPI"] });
 
-  const emptyNamed = resolveCalendarDisplayTickerUniverse({
-    portfolioId: "empty",
+  const cacheBacked = resolveCalendarDisplayTickerUniverse({
+    portfolioId: "income-without-settings",
+    portfolioEventTickers: ["BXSL", "FEPI"],
     legacyPortfolioTickers: ["SHOULD-NOT-LEAK"],
   });
-  assert.deepEqual(emptyNamed, { source: "empty", tickers: [] });
+  assert.deepEqual(cacheBacked, {
+    source: "portfolio-events",
+    tickers: ["BXSL", "FEPI"],
+  });
+  assert.deepEqual(
+    filterCalendarDisplayEvents(
+      [regular("bxsl", "BXSL"), regular("fepi", "FEPI")],
+      cacheBacked.tickers,
+    ).map((event) => event.ticker),
+    ["BXSL", "FEPI"],
+  );
+
+  const explicitlyEmpty = resolveCalendarDisplayTickerUniverse({
+    portfolioId: "empty",
+    manualOverride: { tickers: [] },
+    portfolioEventTickers: ["SHOULD-NOT-LEAK"],
+  });
+  assert.deepEqual(explicitlyEmpty, { source: "manual", tickers: [] });
+});
+
+test("a valid empty default manual override remains authoritative", () => {
+  const result = resolveCalendarDisplayTickerUniverse({
+    portfolioId: "default",
+    manualOverride: {
+      source: MANUAL_CALENDAR_TICKERS_SOURCE,
+      version: MANUAL_CALENDAR_TICKERS_VERSION,
+      tickers: [],
+    },
+    legacyPortfolioTickers: ["STALE"],
+  });
+
+  assert.deepEqual(result, { source: "manual", tickers: [] });
 });
 
 test("display filtering excludes stale tickers without ticker-specific rules", () => {
@@ -200,4 +233,15 @@ test("case 8: filtering and cell projection preserve star, heart, and event iden
   assert.equal(filtered.find((event) => event.id === "starred"), starred);
   assert.equal(filtered.find((event) => event.id === "hearted"), hearted);
   assert.deepEqual(model.visibleRegularEvents.map((event) => event.id), ["starred", "hearted"]);
+});
+
+test("custom alert match scopes the draft to the selected title", () => {
+  assert.deepEqual(
+    buildCalendarDisplayAlertMatch(custom("custom:fomc", "FOMC")),
+    { type: "custom", titleContains: "FOMC" },
+  );
+  assert.deepEqual(
+    buildCalendarDisplayAlertMatch(regular("cag", "CAG", "ex_div")),
+    { ticker: "CAG", type: "ex_div" },
+  );
 });

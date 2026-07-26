@@ -145,6 +145,11 @@ async function loadCalendarDisplayTickerUniverse(
     return resolveCalendarDisplayTickerUniverse({
       portfolioId,
       manualOverride: manualSnap.exists() ? manualSnap.data() : null,
+      portfolioEventTickers: uniqueCalendarDisplayTickers(
+        legacyEvents
+          .filter((event) => event.type !== "custom")
+          .map((event) => event.ticker),
+      ),
     });
   }
 
@@ -175,7 +180,9 @@ async function loadCalendarDisplayTickerUniverse(
 export async function loadCalendarDisplayEvents(uid: string): Promise<ResolvedCalendarEvent[]> {
   const portfolioId = await activePortfolioId(uid);
   const resolved = await loadResolvedCalendarEventsForPortfolio(uid, portfolioId);
-  const universe = await loadCalendarDisplayTickerUniverse(uid, portfolioId, resolved.legacyEvents);
+  const portfolioEvents =
+    portfolioId === DEFAULT_CALENDAR_PORTFOLIO_ID ? resolved.legacyEvents : resolved.events;
+  const universe = await loadCalendarDisplayTickerUniverse(uid, portfolioId, portfolioEvents);
   return filterCalendarDisplayEvents(resolved.events, universe.tickers);
 }
 

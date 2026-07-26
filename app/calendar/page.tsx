@@ -18,6 +18,7 @@ import {
   calendarIdentityKeys,
   findMatchingCalendarIdentityKey,
 } from "@/lib/calendar-contract";
+import { buildCalendarDisplayAlertMatch } from "@/lib/calendar-display";
 import CalendarMonthView, {
   calendarEventTypeLabel,
   type CalendarViewEvent,
@@ -37,10 +38,7 @@ function buildCalendarDraft(event: CalendarViewEvent): Partial<AlertRule> {
       kind: "date",
       selector: {
         source: event.source,
-        match: {
-          ...(event.ticker ? { ticker: event.ticker } : {}),
-          ...(event.type ? { type: String(event.type) } : {}),
-        },
+        match: buildCalendarDisplayAlertMatch(event),
         markFilter: ["star", "heart"],
       },
     },
