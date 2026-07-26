@@ -137,6 +137,33 @@ test("date selector still resolves its next occurrence from calendar events", ()
   );
 });
 
+test("direct selector requires a compatible identity and exact event date", () => {
+  const rule = {
+    ...metricRule("09:00"),
+    id: "direct-calendar-rule",
+    kind: "date",
+    condition: {
+      kind: "date",
+      selector: {
+        source: "calendarEvents",
+        match: {
+          eventId: "dividend:TEST:buy:2026-08-10",
+          date: "2026-08-10",
+          type: "buy_by",
+        },
+      },
+    },
+  };
+
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(rule, [
+      event("TEST", "different-id", "2026-08-11"),
+      event("TEST", "dividend:TEST:buy:2026-08-10"),
+    ]),
+    ["2026-08-10"],
+  );
+});
+
 test("dividend selector resolves its next occurrence from calendar events", () => {
   const rule = {
     ...metricRule("08:00"),

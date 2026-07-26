@@ -37,6 +37,10 @@ export type CalendarMark = "star" | "heart";
 export type DateEventSelector = {
   source: "calendarCustomEvents" | "calendarEvents";
   match?: {
+    // Direct-event rules use a compatible calendar identity plus the event date.
+    // Existing broad filter rules omit these fields and keep their old behavior.
+    eventId?: string;
+    date?: string;
     ticker?: string;
     // Legacy rules used one string. New rules can select multiple event types.
     type?: string | string[];
@@ -254,9 +258,9 @@ export type AlertTemplate = {
   createdAt?: unknown;
 };
 
-// Goralert-owned 🔔 custom mark. NOTE: ⭐(star)/❤️(heart) marks remain read from
-// the existing calendar data (calendarEvents meta); this entity only persists the
-// new bell mark that the alert system owns.
+// Legacy Goralert-owned 🔔 mark shape. Kept for stored-data compatibility only:
+// calendar UI bell state is now derived from active AlertRule documents and no
+// longer reads or writes this collection.
 export type CalendarAlertMark = {
   id: string;
   ticker?: string;

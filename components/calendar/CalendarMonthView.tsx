@@ -11,8 +11,9 @@ import {
 } from "lucide-react";
 import type { CalendarEventType } from "@/lib/calendar-types";
 import {
-  findMatchingCalendarIdentityKey,
-} from "@/lib/calendar-contract";
+  calendarEventIndicator,
+  compareAlertAwareCalendarCellEvents,
+} from "@/lib/calendar-alerts";
 import {
   buildCalendarDayCellModel,
   isCustomCalendarDisplayEvent,
@@ -77,15 +78,11 @@ function formatMonthHeader(month: Date): string {
 
 function EventRow({
   event,
-  marked,
-  busy,
-  onToggleBell,
+  alerted,
   onCreateAlert,
 }: {
   event: CalendarViewEvent;
-  marked: boolean;
-  busy: boolean;
-  onToggleBell: () => void;
+  alerted: boolean;
   onCreateAlert: () => void;
 }) {
   const custom = isCustomCalendarDisplayEvent(event);
@@ -118,20 +115,17 @@ function EventRow({
             <span aria-label="하트" title="하트 (읽기 전용)" className={event.heart ? "" : "opacity-25 grayscale"}>
               ❤️
             </span>
-            <button
-              type="button"
-              onClick={onToggleBell}
-              disabled={busy}
-              aria-pressed={marked}
-              aria-label={marked ? "알림 표시 해제" : "알림 표시"}
-              title={marked ? "알림 표시됨 (탭하여 해제)" : "알림 표시 추가"}
+            <span
+              role="img"
+              aria-label={alerted ? "알림 예정" : "알림 규칙 없음"}
+              title={alerted ? "활성 알림 규칙이 있습니다" : "활성 알림 규칙이 없습니다"}
               className={cx(
-                "rounded-lg p-1 transition-colors disabled:opacity-50",
-                marked ? "text-accent" : "text-muted-foreground hover:text-foreground",
+                "inline-flex rounded-lg p-1",
+                alerted ? "text-accent" : "text-muted-foreground/40",
               )}
             >
-              {marked ? <BellRing size={18} /> : <Bell size={18} />}
-            </button>
+              {alerted ? <BellRing size={18} /> : <Bell size={18} />}
+            </span>
           </div>
         </div>
         <Button size="sm" variant="secondary" className="w-full" onClick={onCreateAlert}>
@@ -148,14 +142,14 @@ const WEEKDAY_HEADERS = ["일", "월", "화", "수", "목", "금", "토"];
 function MonthCalendar({
   monthDate,
   eventsByDate,
-  bellIds,
+  alertedEventIds,
   selectedDate,
   todayIso,
   onSelectDate,
 }: {
   monthDate: Date;
   eventsByDate: Map<string, CalendarViewEvent[]>;
-  bellIds: Set<string>;
+  alertedEventIds: Set<string>;
   selectedDate: string;
   todayIso: string;
   onSelectDate: (date: Date, isoDate: string, isCurrentMonth: boolean) => void;
@@ -172,13 +166,15 @@ function MonthCalendar({
       <div className="grid grid-cols-7 gap-1">
         {cells.map((cell) => {
           const dayEvents = cell.isCurrentMonth ? eventsByDate.get(cell.isoDate) ?? [] : [];
-          const cellModel = buildCalendarDayCellModel(dayEvents);
+          const cellModel = buildCalendarDayCellModel(
+            dayEvents,
+            3,
+            (left, right) => compareAlertAwareCalendarCellEvents(left, right, alertedEventIds),
+          );
           const firstCustom = cellModel.customEvents[0];
           const isSelected = cell.isoDate === selectedDate;
           const isToday = cell.isoDate === todayIso;
-          const hasBell = dayEvents.some(
-            (event) => findMatchingCalendarIdentityKey(event.identityKeys, bellIds) !== null,
-          );
+          const hasBell = dayEvents.some((event) => alertedEventIds.has(event.eventId));
 
           return (
             <button
@@ -219,6 +215,13 @@ function MonthCalendar({
                     +{cellModel.customEvents.length - 1}
                   </span>
                 ) : null}
+                {hasBell ? (
+                  <BellRing
+                    size={10}
+                    className="ml-auto shrink-0 text-accent"
+                    aria-label="이 날짜에 알림 예정 일정 있음"
+                  />
+                ) : null}
               </div>
               <div className="mt-0.5 flex min-h-0 min-w-0 flex-1 flex-col gap-0.5 overflow-hidden">
                 {cellModel.visibleRegularEvents.map((event) => (
@@ -230,7 +233,13 @@ function MonthCalendar({
                       typeVisualClass(event.type),
                     )}
                   >
-                    {event.star ? "⭐" : event.heart ? "♥" : ""}
+                    {calendarEventIndicator(event, alertedEventIds) === "bell"
+                      ? "🔔"
+                      : calendarEventIndicator(event, alertedEventIds) === "star"
+                        ? "⭐"
+                        : calendarEventIndicator(event, alertedEventIds) === "heart"
+                          ? "♥"
+                          : ""}
                     {event.ticker || event.title}
                   </span>
                 ))}
@@ -250,15 +259,11 @@ function MonthCalendar({
 
 export default function CalendarMonthView({
   events,
-  bellIds,
-  busyId,
-  onToggleBell,
+  alertedEventIds,
   onCreateAlert,
 }: {
   events: CalendarViewEvent[];
-  bellIds: Set<string>;
-  busyId: string | null;
-  onToggleBell: (event: CalendarViewEvent) => void;
+  alertedEventIds: Set<string>;
   onCreateAlert: (event: CalendarViewEvent) => void;
 }) {
   const [todayIso, setTodayIso] = useState("");
@@ -267,9 +272,19 @@ export default function CalendarMonthView({
 
   useEffect(() => {
     const today = new Date();
-    setTodayIso(formatIsoDate(today));
-    setSelectedMonth(startOfCalendarMonth(today));
-    setSelectedDate(formatIsoDate(today));
+    const todayDate = formatIsoDate(today);
+    const requestedDate = typeof window === "undefined"
+      ? ""
+      : new URLSearchParams(window.location.search).get("date") ?? "";
+    const parsedRequested = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate)
+      ? new Date(`${requestedDate}T00:00:00`)
+      : null;
+    const initialDate = parsedRequested && Number.isFinite(parsedRequested.getTime())
+      ? parsedRequested
+      : today;
+    setTodayIso(todayDate);
+    setSelectedMonth(startOfCalendarMonth(initialDate));
+    setSelectedDate(formatIsoDate(initialDate));
   }, []);
 
   const monthEvents = useMemo(
@@ -315,9 +330,7 @@ export default function CalendarMonthView({
     <EventRow
       key={`${keyPrefix}-${event.eventId}`}
       event={event}
-      marked={findMatchingCalendarIdentityKey(event.identityKeys, bellIds) !== null}
-      busy={busyId === event.eventId}
-      onToggleBell={() => onToggleBell(event)}
+      alerted={alertedEventIds.has(event.eventId)}
       onCreateAlert={() => onCreateAlert(event)}
     />
   );
@@ -336,7 +349,7 @@ export default function CalendarMonthView({
       </div>
 
       <p className="text-xs text-muted-foreground">
-        ⭐ 별표 · ❤️ 하트는 기존 캘린더 표시(읽기 전용)이고, 🔔 알림 표시만 고라알림에서 관리합니다.
+        ⭐ 별표 · ❤️ 하트는 기존 캘린더 표시이고, 🔔은 활성 알림 규칙이 있는 일정입니다. 모두 읽기 전용입니다.
       </p>
 
       <section className="space-y-3" aria-labelledby="calendar-month-heading">
@@ -374,7 +387,7 @@ export default function CalendarMonthView({
         <MonthCalendar
           monthDate={selectedMonth}
           eventsByDate={eventsByDate}
-          bellIds={bellIds}
+          alertedEventIds={alertedEventIds}
           selectedDate={selectedDate}
           todayIso={todayIso}
           onSelectDate={handleSelectDate}

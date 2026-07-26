@@ -216,6 +216,7 @@ export function compareCalendarCellEvents(
 export function buildCalendarDayCellModel<T extends CalendarDisplayEventLike>(
   events: readonly T[],
   regularLimit = 3,
+  regularComparator: (left: T, right: T) => number = compareCalendarCellEvents,
 ): CalendarDayCellModel<T> {
   const customEvents = events
     .filter(isCustomCalendarDisplayEvent)
@@ -228,7 +229,7 @@ export function buildCalendarDayCellModel<T extends CalendarDisplayEventLike>(
   const regularEvents = events
     .filter((event) => !isCustomCalendarDisplayEvent(event))
     .slice()
-    .sort(compareCalendarCellEvents);
+    .sort(regularComparator);
   const visibleRegularEvents = regularEvents.slice(0, regularLimit);
 
   return {

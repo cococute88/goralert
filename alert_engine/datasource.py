@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .models import DateEventSelector, MetricId
-from .calendar_contract import normalize_calendar_event_type
+from .calendar_contract import calendar_event_identity_keys, normalize_calendar_event_type
 from .rsi import compute_rsi
 
 logger = logging.getLogger("alert_engine.datasource")
@@ -283,6 +283,12 @@ class AlertDataSource:
     def _event_matches(event: Dict[str, Any], match: Dict[str, Any]) -> bool:
         if not match:
             return True
+        event_id = match.get("eventId")
+        if event_id and str(event_id).strip() not in calendar_event_identity_keys(event):
+            return False
+        event_date = match.get("date")
+        if event_date and str(event.get("date", ""))[:10] != str(event_date)[:10]:
+            return False
         ticker = match.get("ticker")
         if ticker and str(event.get("ticker", "")).upper() != str(ticker).upper():
             return False

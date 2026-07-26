@@ -9,7 +9,7 @@ Handles two flavors of ``kind:"date"`` rules:
 
 2. Calendar-driven (selector present, recurrence.kind == "calendar"): fire when
    a matching calendar event lands on the evaluation date. Honors
-   selector.match {ticker,type,titleContains} and selector.markFilter
+   selector.match {eventId,date,ticker,type,titleContains} and selector.markFilter
    (⭐ star / ❤️ heart) per US-006/US-007. The matched ticker is exposed via
    ``extra["ticker"]`` so the engine can render ``{ticker}`` in messages.
 """

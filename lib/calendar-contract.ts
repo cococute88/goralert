@@ -186,11 +186,15 @@ function selectorNotificationDates(
   );
   const ticker = text(match.ticker).toUpperCase();
   const contains = text(match.titleContains).toLocaleLowerCase();
+  const identity = text(match.eventId);
+  const date = text(match.date).slice(0, 10);
   const marks = selector.source === "calendarCustomEvents" ? [] : selector.markFilter ?? [];
   const dates: string[] = [];
 
   for (const event of events) {
     if (event.source !== selector.source) continue;
+    if (identity && !calendarIdentityKeys(event as unknown as CalendarRecord).includes(identity)) continue;
+    if (date && event.date !== date) continue;
     if (ticker && event.ticker.toUpperCase() !== ticker) continue;
     if (contains && !text(event.title).toLocaleLowerCase().includes(contains)) continue;
     if (marks.length > 0 && !marks.some((mark) => Boolean(event[mark]))) continue;

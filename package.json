@@ -13,7 +13,8 @@
     "test:push-devices": "node --test tests/push-device-data.test.mjs",
     "test:calendar-contract": "node --test tests/calendar-contract.test.mjs",
     "test:calendar-view": "node --test tests/calendar-view.test.mjs",
-    "test:calendar-display": "node --test tests/calendar-display.test.mjs"
+    "test:calendar-display": "node --test tests/calendar-display.test.mjs",
+    "test:calendar-alerts": "node --test tests/calendar-alerts.test.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.0",

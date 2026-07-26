@@ -23,3 +23,25 @@ def test_calendar_selector_title_contains_is_trimmed_and_case_insensitive_for_ko
     assert AlertDataSource._event_matches({"title": "삼성전자 실적 발표"}, {"titleContains": " 실적 "})
     assert AlertDataSource._event_matches({"title": "SCHD Ex-Dividend Date"}, {"titleContains": "ex-dividend"})
     assert AlertDataSource._event_matches({"title": "anything"}, {"titleContains": "   "})
+
+
+def test_calendar_selector_matches_direct_event_by_compatible_identity_and_date():
+    event = {
+        "id": "payload-id",
+        "canonicalEventId": "dividend:CAG:buy:2026-07-30",
+        "date": "2026-07-30",
+        "ticker": "CAG",
+        "type": "buy_by",
+    }
+    assert AlertDataSource._event_matches(
+        event,
+        {"eventId": "dividend:CAG:buy:2026-07-30", "date": "2026-07-30"},
+    )
+    assert not AlertDataSource._event_matches(
+        event,
+        {"eventId": "another-event", "date": "2026-07-30"},
+    )
+    assert not AlertDataSource._event_matches(
+        event,
+        {"eventId": "dividend:CAG:buy:2026-07-30", "date": "2026-07-31"},
+    )
