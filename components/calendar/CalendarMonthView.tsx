@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bell,
   BellRing,
@@ -150,16 +150,17 @@ function MonthCalendar({
   eventsByDate,
   bellIds,
   selectedDate,
+  todayIso,
   onSelectDate,
 }: {
   monthDate: Date;
   eventsByDate: Map<string, CalendarViewEvent[]>;
   bellIds: Set<string>;
   selectedDate: string;
+  todayIso: string;
   onSelectDate: (date: Date, isoDate: string, isCurrentMonth: boolean) => void;
 }) {
   const cells = buildMonthGrid(monthDate);
-  const todayIso = formatIsoDate(new Date());
 
   return (
     <div className="rounded-2xl border border-border bg-card p-2 shadow-sm">
@@ -260,12 +261,19 @@ export default function CalendarMonthView({
   onToggleBell: (event: CalendarViewEvent) => void;
   onCreateAlert: (event: CalendarViewEvent) => void;
 }) {
-  const [initialToday] = useState(() => new Date());
-  const [selectedMonth, setSelectedMonth] = useState(() => startOfCalendarMonth(initialToday));
-  const [selectedDate, setSelectedDate] = useState(() => formatIsoDate(initialToday));
+  const [todayIso, setTodayIso] = useState("");
+  const [selectedMonth, setSelectedMonth] = useState<Date | null>(null);
+  const [selectedDate, setSelectedDate] = useState("");
+
+  useEffect(() => {
+    const today = new Date();
+    setTodayIso(formatIsoDate(today));
+    setSelectedMonth(startOfCalendarMonth(today));
+    setSelectedDate(formatIsoDate(today));
+  }, []);
 
   const monthEvents = useMemo(
-    () => calendarEventsForMonth(events, selectedMonth),
+    () => (selectedMonth ? calendarEventsForMonth(events, selectedMonth) : []),
     [events, selectedMonth],
   );
   const eventsByDate = useMemo(
@@ -287,12 +295,14 @@ export default function CalendarMonthView({
   };
 
   const moveMonth = (offset: number) => {
+    if (!selectedMonth) return;
     const nextMonth = addCalendarMonths(selectedMonth, offset);
     selectMonth(nextMonth, formatIsoDate(nextMonth));
   };
 
   const returnToCurrentMonth = () => {
     const today = new Date();
+    setTodayIso(formatIsoDate(today));
     selectMonth(today, formatIsoDate(today));
   };
 
@@ -311,6 +321,10 @@ export default function CalendarMonthView({
       onCreateAlert={() => onCreateAlert(event)}
     />
   );
+
+  if (!selectedMonth || !selectedDate || !todayIso) {
+    return <div className="min-h-[20rem]" aria-busy="true" aria-label="캘린더 준비 중" />;
+  }
 
   return (
     <div className="space-y-5">
@@ -360,6 +374,7 @@ export default function CalendarMonthView({
           eventsByDate={eventsByDate}
           bellIds={bellIds}
           selectedDate={selectedDate}
+          todayIso={todayIso}
           onSelectDate={handleSelectDate}
         />
       </section>

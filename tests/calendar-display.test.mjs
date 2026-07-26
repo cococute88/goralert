@@ -138,6 +138,24 @@ test("a valid empty default manual override remains authoritative", () => {
   assert.deepEqual(result, { source: "manual", tickers: [] });
 });
 
+test("default cache-only data falls back to active namespace event tickers", () => {
+  const universe = resolveCalendarDisplayTickerUniverse({
+    portfolioId: "default",
+    portfolioEventTickers: ["CACHE-A", "CACHE-B"],
+  });
+  assert.deepEqual(universe, {
+    source: "portfolio-events",
+    tickers: ["CACHE-A", "CACHE-B"],
+  });
+  assert.deepEqual(
+    filterCalendarDisplayEvents(
+      [regular("cache-a", "CACHE-A"), regular("cache-b", "CACHE-B")],
+      universe.tickers,
+    ).map((event) => event.ticker),
+    ["CACHE-A", "CACHE-B"],
+  );
+});
+
 test("display filtering excludes stale tickers without ticker-specific rules", () => {
   const active = regular("active", "CAG");
   const stale = regular("stale", "STALE");

@@ -135,6 +135,7 @@ async function loadCalendarDisplayTickerUniverse(
   uid: string,
   portfolioId: string,
   legacyEvents: ResolvedCalendarEvent[],
+  resolvedEvents: ResolvedCalendarEvent[],
 ): Promise<CalendarDisplayTickerUniverse> {
   const db = requireDb();
   const isDefault = portfolioId === DEFAULT_CALENDAR_PORTFOLIO_ID;
@@ -146,7 +147,7 @@ async function loadCalendarDisplayTickerUniverse(
       portfolioId,
       manualOverride: manualSnap.exists() ? manualSnap.data() : null,
       portfolioEventTickers: uniqueCalendarDisplayTickers(
-        legacyEvents
+        resolvedEvents
           .filter((event) => event.type !== "custom")
           .map((event) => event.ticker),
       ),
@@ -174,15 +175,23 @@ async function loadCalendarDisplayTickerUniverse(
       memoItems && typeof memoItems === "object" && !Array.isArray(memoItems)
         ? Object.keys(memoItems as Record<string, unknown>)
         : [],
+    portfolioEventTickers: uniqueCalendarDisplayTickers(
+      resolvedEvents
+        .filter((event) => event.type !== "custom")
+        .map((event) => event.ticker),
+    ),
   });
 }
 
 export async function loadCalendarDisplayEvents(uid: string): Promise<ResolvedCalendarEvent[]> {
   const portfolioId = await activePortfolioId(uid);
   const resolved = await loadResolvedCalendarEventsForPortfolio(uid, portfolioId);
-  const portfolioEvents =
-    portfolioId === DEFAULT_CALENDAR_PORTFOLIO_ID ? resolved.legacyEvents : resolved.events;
-  const universe = await loadCalendarDisplayTickerUniverse(uid, portfolioId, portfolioEvents);
+  const universe = await loadCalendarDisplayTickerUniverse(
+    uid,
+    portfolioId,
+    resolved.legacyEvents,
+    resolved.events,
+  );
   return filterCalendarDisplayEvents(resolved.events, universe.tickers);
 }
 

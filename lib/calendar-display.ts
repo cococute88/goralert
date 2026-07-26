@@ -121,6 +121,11 @@ export function resolveCalendarDisplayTickerUniverse(
   const legacyMemos = uniqueCalendarDisplayTickers(input.legacyMemoKeys ?? []);
   if (legacyMemos.length > 0) return { source: "legacy-memos", tickers: legacyMemos };
 
+  const portfolioEvents = uniqueCalendarDisplayTickers(input.portfolioEventTickers ?? []);
+  if (portfolioEvents.length > 0) {
+    return { source: "portfolio-events", tickers: portfolioEvents };
+  }
+
   return { source: "empty", tickers: [] };
 }
 
