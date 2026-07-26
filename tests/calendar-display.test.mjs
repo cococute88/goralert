@@ -156,6 +156,18 @@ test("default cache-only data falls back to active namespace event tickers", () 
   );
 });
 
+test("mixed legacy and cache-backed data preserves both ticker sources", () => {
+  const universe = resolveCalendarDisplayTickerUniverse({
+    portfolioId: "default",
+    legacyEventTickers: ["LEGACY"],
+    portfolioEventTickers: ["LEGACY", "CACHE"],
+  });
+  assert.deepEqual(universe, {
+    source: "legacy-events",
+    tickers: ["LEGACY", "CACHE"],
+  });
+});
+
 test("display filtering excludes stale tickers without ticker-specific rules", () => {
   const active = regular("active", "CAG");
   const stale = regular("stale", "STALE");

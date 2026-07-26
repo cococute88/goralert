@@ -116,7 +116,15 @@ export function resolveCalendarDisplayTickerUniverse(
   }
 
   const legacyEvents = uniqueCalendarDisplayTickers(input.legacyEventTickers ?? []);
-  if (legacyEvents.length > 0) return { source: "legacy-events", tickers: legacyEvents };
+  if (legacyEvents.length > 0) {
+    return {
+      source: "legacy-events",
+      tickers: uniqueCalendarDisplayTickers([
+        ...legacyEvents,
+        ...(input.portfolioEventTickers ?? []),
+      ]),
+    };
+  }
 
   const legacyMemos = uniqueCalendarDisplayTickers(input.legacyMemoKeys ?? []);
   if (legacyMemos.length > 0) return { source: "legacy-memos", tickers: legacyMemos };
