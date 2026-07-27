@@ -106,6 +106,7 @@ class MetricId:
 @dataclass
 class DateEventSelector:
     source: str = "calendarEvents"
+    portfolioId: Optional[str] = None
     match: Optional[Dict[str, Any]] = None
     markFilter: Optional[List[str]] = None
 
@@ -121,6 +122,7 @@ class DateEventSelector:
             mark_filter = None
         return cls(
             source=_as_str(data.get("source")) or "calendarEvents",
+            portfolioId=_as_str(data.get("portfolioId")),
             match=match,
             markFilter=mark_filter,
         )
@@ -128,6 +130,7 @@ class DateEventSelector:
     def to_dict(self) -> Dict[str, Any]:
         return _drop_none({
             "source": self.source,
+            "portfolioId": self.portfolioId,
             "match": self.match,
             "markFilter": self.markFilter,
         })

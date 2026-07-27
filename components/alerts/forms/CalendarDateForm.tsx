@@ -11,6 +11,7 @@ import {
   normalizeCalendarEventTypes,
   type AlertCalendarEventType,
 } from "@/lib/alerts/calendar-event-types";
+import { normalizeCalendarDateSelector } from "@/lib/calendar-contract";
 import { Field, Select, TimeInput, TextInput, SEOUL_TZ, type RuleFormProps } from "./fields";
 
 const SOURCE_OPTIONS: { value: DateEventSelector["source"]; label: string }[] = [
@@ -27,7 +28,9 @@ function asDateCondition(value: Partial<DateCondition> | undefined): DateConditi
 
 export default function CalendarDateForm({ value, onChange }: RuleFormProps) {
   const condition = asDateCondition(value.condition?.kind === "date" ? value.condition : undefined);
-  const selector = condition.selector ?? { source: "calendarEvents" };
+  const selector = normalizeCalendarDateSelector(
+    condition.selector ?? { source: "calendarEvents" },
+  );
   const marks = selector.markFilter ?? [];
   const recurrence = value.trigger?.recurrence;
   const storedEventTypes = normalizeCalendarEventTypes(selector.match?.type);

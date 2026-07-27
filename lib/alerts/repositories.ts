@@ -262,6 +262,22 @@ export async function loadAlertSettings(uid: string): Promise<AlertSettings> {
   };
 }
 
+export function watchAlertRules(
+  uid: string,
+  onChange: (rules: AlertRule[]) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  if (!firestoreDb) {
+    onChange([]);
+    return () => {};
+  }
+  return onSnapshot(
+    alertRulesCol(firestoreDb, uid),
+    (snap) => onChange(snap.docs.map((item) => item.data() as unknown as AlertRule)),
+    (error) => onError?.(error),
+  );
+}
+
 export async function saveAlertSettings(uid: string, partial: Partial<AlertSettings>): Promise<void> {
   const payload = sanitizeFirestorePayload({
     ...partial,

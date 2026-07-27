@@ -20,6 +20,7 @@ import { deriveFormKind, defaultKindForForm, type FormKind } from "@/components/
 import { takeDraft } from "@/components/alerts/draftStore";
 
 type Step = "select" | "template" | "form";
+type CreationMode = "standard" | "single-event";
 
 const SEOUL_TZ = "Asia/Seoul";
 
@@ -63,6 +64,8 @@ export default function NewAlertPage() {
   const [formKind, setFormKind] = useState<FormKind>("date");
   const [draft, setDraft] = useState<Partial<AlertRule>>({});
   const [settings, setSettings] = useState<AlertSettings | undefined>(undefined);
+  const [creationMode, setCreationMode] = useState<CreationMode>("standard");
+  const [returnTo, setReturnTo] = useState("/calendar");
   const [ready, setReady] = useState(false);
 
   // Consume a cloned/prefilled draft (from the list 복제 action) on mount.
@@ -70,12 +73,20 @@ export default function NewAlertPage() {
   // from the alerts list), open it directly. Reads window.location to avoid the
   // useSearchParams Suspense requirement.
   useEffect(() => {
+    const params = typeof window === "undefined"
+      ? new URLSearchParams()
+      : new URLSearchParams(window.location.search);
     const stashed = takeDraft();
     if (stashed) {
       setDraft(stashed);
       setFormKind(deriveFormKind(stashed));
       setStep("form");
-    } else if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("start") === "template") {
+      if (params.get("mode") === "single-event" && deriveFormKind(stashed) === "calendar") {
+        setCreationMode("single-event");
+        const requestedReturn = params.get("returnTo") ?? "";
+        setReturnTo(requestedReturn.startsWith("/calendar") ? requestedReturn : "/calendar");
+      }
+    } else if (params.get("start") === "template") {
       setStep("template");
     }
     setReady(true);
@@ -118,6 +129,10 @@ export default function NewAlertPage() {
   };
 
   const goBack = () => {
+    if (creationMode === "single-event") {
+      router.push(returnTo);
+      return;
+    }
     if (step === "form") setStep("select");
     else if (step === "template") setStep("select");
     else router.push("/alerts");
@@ -130,7 +145,13 @@ export default function NewAlertPage() {
           <ChevronLeft size={20} />
         </button>
         <h1 className="text-lg font-bold text-foreground">
-          {step === "select" ? "새 알림 만들기" : step === "template" ? "템플릿 선택" : "알림 설정"}
+          {creationMode === "single-event"
+            ? "일정 알림 만들기"
+            : step === "select"
+              ? "새 알림 만들기"
+              : step === "template"
+                ? "템플릿 선택"
+                : "알림 설정"}
         </h1>
       </div>
 
@@ -143,7 +164,8 @@ export default function NewAlertPage() {
           draft={draft}
           setDraft={setDraft}
           submitLabel="알림 저장"
-          onSaved={() => router.push("/alerts")}
+          mode={creationMode === "single-event" ? "single-calendar-event" : "standard"}
+          onSaved={() => router.push(creationMode === "single-event" ? returnTo : "/alerts")}
         />
       ) : null}
     </div>

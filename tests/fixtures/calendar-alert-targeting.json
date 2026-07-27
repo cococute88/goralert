@@ -1,0 +1,248 @@
+{
+  "events": [
+    {
+      "key": "omf-buy",
+      "id": "dividend:OMF:buy:2026-08-10",
+      "eventId": "dividend:OMF:buy:2026-08-10",
+      "canonicalEventId": "dividend:OMF:buy:2026-08-10",
+      "identityKeys": [
+        "dividend:OMF:buy:2026-08-10",
+        "OMF-buy_by-2026-08-10"
+      ],
+      "date": "2026-08-10",
+      "ticker": "OMF",
+      "type": "buy_by",
+      "title": "OMF 매수 마감",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": false,
+      "heart": true
+    },
+    {
+      "key": "owl-buy",
+      "id": "dividend:OWL:buy:2026-08-12",
+      "eventId": "dividend:OWL:buy:2026-08-12",
+      "canonicalEventId": "dividend:OWL:buy:2026-08-12",
+      "identityKeys": [
+        "dividend:OWL:buy:2026-08-12",
+        "OWL-buy_by-2026-08-12"
+      ],
+      "date": "2026-08-12",
+      "ticker": "OWL",
+      "type": "buy_by",
+      "title": "OWL 매수 마감",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": false,
+      "heart": true
+    },
+    {
+      "key": "cag-buy",
+      "id": "dividend:CAG:buy:2026-07-29",
+      "eventId": "dividend:CAG:buy:2026-07-29",
+      "canonicalEventId": "dividend:CAG:buy:2026-07-29",
+      "identityKeys": [
+        "dividend:CAG:buy:2026-07-29",
+        "CAG-buy_by-2026-07-29"
+      ],
+      "date": "2026-07-29",
+      "ticker": "CAG",
+      "type": "buy_by",
+      "title": "CAG 매수 마감",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": true,
+      "heart": false
+    },
+    {
+      "key": "cag-other-buy",
+      "id": "dividend:CAG:buy:2026-08-29",
+      "eventId": "dividend:CAG:buy:2026-08-29",
+      "canonicalEventId": "dividend:CAG:buy:2026-08-29",
+      "identityKeys": [
+        "dividend:CAG:buy:2026-08-29",
+        "CAG-buy_by-2026-08-29"
+      ],
+      "date": "2026-08-29",
+      "ticker": "CAG",
+      "type": "buy_by",
+      "title": "CAG 매수 마감",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": true,
+      "heart": false
+    },
+    {
+      "key": "mlpa-buy",
+      "id": "dividend:MLPA:buy:2026-08-10",
+      "eventId": "dividend:MLPA:buy:2026-08-10",
+      "canonicalEventId": "dividend:MLPA:buy:2026-08-10",
+      "identityKeys": [
+        "dividend:MLPA:buy:2026-08-10",
+        "MLPA-buy_by-2026-08-10"
+      ],
+      "date": "2026-08-10",
+      "ticker": "MLPA",
+      "type": "buy_by",
+      "title": "MLPA 매수 마감",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": false,
+      "heart": false
+    },
+    {
+      "key": "omf-ex-div",
+      "id": "dividend:OMF:ex_div:2026-08-11",
+      "eventId": "dividend:OMF:ex_div:2026-08-11",
+      "canonicalEventId": "dividend:OMF:ex_div:2026-08-11",
+      "identityKeys": [
+        "dividend:OMF:ex_div:2026-08-11",
+        "OMF-ex_div-2026-08-11"
+      ],
+      "date": "2026-08-11",
+      "ticker": "OMF",
+      "type": "ex_div",
+      "title": "OMF 배당락",
+      "source": "calendarEvents",
+      "sourceKind": "declared",
+      "star": false,
+      "heart": true
+    },
+    {
+      "key": "nfp-direct",
+      "id": "custom:nfp:2026-07-02",
+      "eventId": "custom:nfp:2026-07-02",
+      "canonicalEventId": "custom:nfp:2026-07-02",
+      "identityKeys": [
+        "custom:nfp:2026-07-02"
+      ],
+      "date": "2026-07-02",
+      "ticker": "",
+      "type": "custom",
+      "title": "NFP(21:30)",
+      "source": "calendarCustomEvents",
+      "sourceKind": "custom",
+      "star": false,
+      "heart": false
+    },
+    {
+      "key": "nfp-other",
+      "id": "custom:nfp:2026-08-07",
+      "eventId": "custom:nfp:2026-08-07",
+      "canonicalEventId": "custom:nfp:2026-08-07",
+      "identityKeys": [
+        "custom:nfp:2026-08-07"
+      ],
+      "date": "2026-08-07",
+      "ticker": "",
+      "type": "custom",
+      "title": "NFP(21:30)",
+      "source": "calendarCustomEvents",
+      "sourceKind": "custom",
+      "star": false,
+      "heart": false
+    }
+  ],
+  "rules": [
+    {
+      "id": "generic-buy-mark-or",
+      "enabled": true,
+      "selector": {
+        "source": "calendarEvents",
+        "match": {
+          "type": [
+            "buy_by"
+          ],
+          "titleContains": "buy-deadline"
+        },
+        "markFilter": [
+          "star",
+          "heart"
+        ]
+      },
+      "expectedEventKeys": [
+        "omf-buy",
+        "owl-buy",
+        "cag-buy",
+        "cag-other-buy"
+      ]
+    },
+    {
+      "id": "generic-buy-type-only",
+      "enabled": true,
+      "selector": {
+        "source": "calendarEvents",
+        "match": {
+          "type": "buy_by"
+        }
+      },
+      "expectedEventKeys": [
+        "omf-buy",
+        "owl-buy",
+        "cag-buy",
+        "cag-other-buy",
+        "mlpa-buy"
+      ]
+    },
+    {
+      "id": "generic-title",
+      "enabled": true,
+      "selector": {
+        "source": "calendarEvents",
+        "match": {
+          "titleContains": "OWL"
+        }
+      },
+      "expectedEventKeys": [
+        "owl-buy"
+      ]
+    },
+    {
+      "id": "direct-cag",
+      "enabled": true,
+      "selector": {
+        "source": "calendarEvents",
+        "match": {
+          "eventId": "dividend:CAG:buy:2026-07-29",
+          "date": "2026-07-29",
+          "ticker": "CAG",
+          "type": "buy_by"
+        }
+      },
+      "expectedEventKeys": [
+        "cag-buy"
+      ]
+    },
+    {
+      "id": "direct-nfp",
+      "enabled": true,
+      "selector": {
+        "source": "calendarCustomEvents",
+        "match": {
+          "eventId": "custom:nfp:2026-07-02",
+          "date": "2026-07-02",
+          "type": "custom",
+          "titleContains": "NFP(21:30)"
+        }
+      },
+      "expectedEventKeys": [
+        "nfp-direct"
+      ]
+    },
+    {
+      "id": "disabled-buy-mark-or",
+      "enabled": false,
+      "selector": {
+        "source": "calendarEvents",
+        "match": {
+          "type": "buy_by"
+        },
+        "markFilter": [
+          "star",
+          "heart"
+        ]
+      },
+      "expectedEventKeys": []
+    }
+  ]
+}

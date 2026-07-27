@@ -25,7 +25,10 @@ import CustomForm from "./CustomForm";
 import DeliveryChannelsField from "./DeliveryChannelsField";
 import MessageTemplateField from "./MessageTemplateField";
 import AdvancedTriggerFields from "./AdvancedTriggerFields";
+import SingleCalendarEventForm from "./SingleCalendarEventForm";
 import { buildRule, buildTemplateFromDraft, type FormKind } from "./ruleModel";
+import { ruleFormVisibility, type RuleFormMode } from "./rule-form-mode";
+import { isSingleCalendarEventOccurrenceFuture } from "@/lib/calendar-alerts";
 
 function PerKindForm({ formKind, value, onChange }: { formKind: FormKind } & RuleFormProps) {
   switch (formKind) {
@@ -50,6 +53,7 @@ export default function RuleForm({
   setDraft,
   submitLabel,
   onSaved,
+  mode = "standard",
 }: {
   uid: string;
   formKind: FormKind;
@@ -57,14 +61,22 @@ export default function RuleForm({
   setDraft: (next: Partial<AlertRule>) => void;
   submitLabel: string;
   onSaved: () => void;
+  mode?: RuleFormMode;
 }) {
   const toast = useToast();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [savingFavorite, setSavingFavorite] = useState(false);
+  const visibility = ruleFormVisibility(mode);
 
   const handleSave = async () => {
+    if (mode === "single-calendar-event" && !isSingleCalendarEventOccurrenceFuture(draft)) {
+      const message = "선택한 일정의 알림 시각이 이미 지났습니다";
+      setErrors([message]);
+      toast.error(message);
+      return;
+    }
     const rule = buildRule(uid, draft);
     const result = validateAlertRule(rule);
     if (!result.ok) {
@@ -115,22 +127,30 @@ export default function RuleForm({
         />
       </Field>
 
-      <PerKindForm formKind={formKind} value={draft} onChange={setDraft} />
+      {visibility.singleEventSummary ? (
+        <SingleCalendarEventForm value={draft} onChange={setDraft} />
+      ) : visibility.perKindFilters ? (
+        <PerKindForm formKind={formKind} value={draft} onChange={setDraft} />
+      ) : null}
 
       <div className="h-px bg-border" />
 
       <DeliveryChannelsField value={draft} onChange={setDraft} />
-      <MessageTemplateField value={draft} onChange={setDraft} />
+      {visibility.messageTemplate ? <MessageTemplateField value={draft} onChange={setDraft} /> : null}
 
-      <button
-        type="button"
-        onClick={() => setShowAdvanced((prev) => !prev)}
-        className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-3 py-2 text-sm font-medium text-foreground"
-      >
-        고급 설정
-        {showAdvanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-      </button>
-      {showAdvanced ? <AdvancedTriggerFields value={draft} onChange={setDraft} /> : null}
+      {visibility.advancedSettings ? (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowAdvanced((prev) => !prev)}
+            className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-3 py-2 text-sm font-medium text-foreground"
+          >
+            고급 설정
+            {showAdvanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          </button>
+          {showAdvanced ? <AdvancedTriggerFields value={draft} onChange={setDraft} /> : null}
+        </>
+      ) : null}
 
       {errors.length > 0 ? (
         <ul className="space-y-1 rounded-xl border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
@@ -145,10 +165,12 @@ export default function RuleForm({
           {saving ? <Loader2 size={16} className="animate-spin" /> : null}
           {submitLabel}
         </Button>
-        <Button variant="secondary" onClick={handleSaveFavorite} disabled={savingFavorite} className="w-full">
-          {savingFavorite ? <Loader2 size={16} className="animate-spin" /> : <Star size={16} />}
-          즐겨찾기로 저장
-        </Button>
+        {visibility.favoriteAction ? (
+          <Button variant="secondary" onClick={handleSaveFavorite} disabled={savingFavorite} className="w-full">
+            {savingFavorite ? <Loader2 size={16} className="animate-spin" /> : <Star size={16} />}
+            즐겨찾기로 저장
+          </Button>
+        ) : null}
       </div>
     </div>
   );

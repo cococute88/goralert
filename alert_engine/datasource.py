@@ -22,7 +22,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .models import DateEventSelector, MetricId
-from .calendar_contract import normalize_calendar_event_type
+from .calendar_contract import (
+    calendar_event_identity_keys,
+    calendar_selector_match_types,
+    calendar_selector_title_contains,
+    normalize_calendar_event_type,
+)
 from .rsi import compute_rsi
 
 logger = logging.getLogger("alert_engine.datasource")
@@ -247,11 +252,12 @@ class AlertDataSource:
             from . import firestore_client as firestore  # lazy import
 
         source = selector.source if selector and selector.source else "calendarEvents"
+        portfolio_id = selector.portfolioId if selector else None
         try:
             if source == "calendarCustomEvents":
-                events = firestore.read_calendar_custom_events(uid)
+                events = firestore.read_calendar_custom_events(uid, portfolio_id=portfolio_id)
             else:
-                events = firestore.read_calendar_events(uid)
+                events = firestore.read_calendar_events(uid, portfolio_id=portfolio_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("calendar read failure source=%s (%s)", source, exc)
             return []
@@ -283,12 +289,17 @@ class AlertDataSource:
     def _event_matches(event: Dict[str, Any], match: Dict[str, Any]) -> bool:
         if not match:
             return True
+        event_id = match.get("eventId")
+        if event_id and str(event_id).strip() not in calendar_event_identity_keys(event):
+            return False
+        event_date = match.get("date")
+        if event_date and str(event.get("date", ""))[:10] != str(event_date)[:10]:
+            return False
         ticker = match.get("ticker")
         if ticker and str(event.get("ticker", "")).upper() != str(ticker).upper():
             return False
-        ev_type = match.get("type")
-        if ev_type:
-            raw_types = ev_type if isinstance(ev_type, list) else [ev_type]
+        accepted_types = calendar_selector_match_types(match)
+        if accepted_types:
             # Old UI hints stored these two values even though the calendar's
             # actual persisted codes are ex_div/buy_by. `buy_by_minus_1` is an
             # alert-only selector: it reads the same buy_by source event and
@@ -298,15 +309,14 @@ class AlertDataSource:
             accepted_types = {
                 "buy_by" if normalize_calendar_event_type(item) == "buy_by_minus_1"
                 else normalize_calendar_event_type(item)
-                for item in raw_types
-                if str(item).strip()
+                for item in accepted_types
             }
             if accepted_types and normalize_calendar_event_type(event.get("type")) not in accepted_types:
                 return False
-        contains = match.get("titleContains")
-        if isinstance(contains, str) and contains.strip():
+        contains = calendar_selector_title_contains(match)
+        if contains:
             title = str(event.get("title", "")).casefold()
-            if contains.strip().casefold() not in title:
+            if contains.casefold() not in title:
                 return False
         return True
 
