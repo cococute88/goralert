@@ -31,6 +31,14 @@ const alerts = loadTsModule("lib/calendar-alerts.ts", {
   "@/lib/calendar-display": display,
 });
 const { ruleFormVisibility } = loadTsModule("components/alerts/forms/rule-form-mode.ts");
+const alertIds = loadTsModule("lib/alerts/id.ts");
+const { buildRule } = loadTsModule("components/alerts/forms/ruleModel.ts", {
+  "@/lib/alerts/id": alertIds,
+  "@/lib/calendar-contract": contract,
+});
+const targetingFixture = JSON.parse(
+  fs.readFileSync("tests/fixtures/calendar-alert-targeting.json", "utf8"),
+);
 
 function event(id, overrides = {}) {
   return {
@@ -150,6 +158,64 @@ test("existing broad filter rules retain their matching behavior", () => {
   });
 
   assert.equal(alerts.alertRuleTargetsCalendarEvent(general, selected), true);
+});
+
+test("shared Engine/UI targeting fixture preserves generic and direct rule semantics", () => {
+  for (const fixtureRule of targetingFixture.rules) {
+    const alertRule = rule(
+      fixtureRule.id,
+      fixtureRule.selector,
+      fixtureRule.enabled,
+    );
+    const actual = targetingFixture.events
+      .filter((fixtureEvent) => alerts.alertRuleTargetsCalendarEvent(
+        alertRule,
+        fixtureEvent,
+        targetingFixture.events,
+      ))
+      .map((fixtureEvent) => fixtureEvent.key);
+
+    assert.deepEqual(actual, fixtureRule.expectedEventKeys, fixtureRule.id);
+  }
+});
+
+test("legacy event-type token in titleContains is compatible but ordinary title text remains restrictive", () => {
+  const heartedBuy = event("omf", {
+    ticker: "OMF",
+    title: "OMF 매수 마감",
+    heart: true,
+  });
+  const compatible = rule("compatible", {
+    source: "calendarEvents",
+    match: { type: "buy_by", titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
+  const realTitleFilter = rule("real-title", {
+    source: "calendarEvents",
+    match: { type: "buy_by", titleContains: "OWL" },
+    markFilter: ["star", "heart"],
+  });
+  const conflictingLegacyToken = rule("conflicting", {
+    source: "calendarEvents",
+    match: { type: "ex_div", titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
+
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(compatible, heartedBuy), true);
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(realTitleFilter, heartedBuy), false);
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(conflictingLegacyToken, heartedBuy), false);
+});
+
+test("saving a legacy generic rule removes the stale title token and keeps its canonical type", () => {
+  const draft = rule("legacy-draft", {
+    source: "calendarEvents",
+    match: { type: ["buy_by"], titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
+  const saved = buildRule("user-1", draft);
+
+  assert.deepEqual(saved.condition.selector.match, { type: ["buy_by"] });
+  assert.deepEqual(saved.condition.selector.markFilter, ["star", "heart"]);
 });
 
 test("single-event form removes broad filters while the standard form keeps them", () => {

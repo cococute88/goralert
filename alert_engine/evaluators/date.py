@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from ..calendar_contract import normalize_calendar_event_type
+from ..calendar_contract import (
+    calendar_selector_match_types,
+    normalize_calendar_event_type,
+)
 from ..models import AlertRule, Condition
 from ..recurrence import get_tz
 from .base import EvalContext, EvalResult
@@ -37,13 +40,7 @@ def _selected_event_types(condition: Condition) -> set[str]:
     """Return normalized selector types; an empty set means every raw event type."""
     selector = condition.selector
     match = selector.match if selector and selector.match else {}
-    raw_types = match.get("type") if isinstance(match, dict) else None
-    values = raw_types if isinstance(raw_types, list) else [raw_types]
-    return {
-        normalize_calendar_event_type(value)
-        for value in values
-        if isinstance(value, str) and value.strip()
-    }
+    return calendar_selector_match_types(match)
 
 
 def _notification_events(events: list[dict], selected_types: set[str]) -> list[dict]:

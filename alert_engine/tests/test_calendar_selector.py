@@ -1,4 +1,18 @@
+import json
+from pathlib import Path
+
 from alert_engine.datasource import AlertDataSource
+from alert_engine.models import DateEventSelector
+
+
+TARGETING_FIXTURE = json.loads(
+    (
+        Path(__file__).parents[2]
+        / "tests"
+        / "fixtures"
+        / "calendar-alert-targeting.json"
+    ).read_text(encoding="utf-8")
+)
 
 
 def test_calendar_selector_accepts_multiple_canonical_event_types():
@@ -23,6 +37,41 @@ def test_calendar_selector_title_contains_is_trimmed_and_case_insensitive_for_ko
     assert AlertDataSource._event_matches({"title": "삼성전자 실적 발표"}, {"titleContains": " 실적 "})
     assert AlertDataSource._event_matches({"title": "SCHD Ex-Dividend Date"}, {"titleContains": "ex-dividend"})
     assert AlertDataSource._event_matches({"title": "anything"}, {"titleContains": "   "})
+
+
+def test_shared_ui_engine_targeting_fixture_preserves_generic_and_direct_rule_semantics():
+    for fixture_rule in TARGETING_FIXTURE["rules"]:
+        selector = DateEventSelector.from_dict(fixture_rule["selector"])
+        matched = []
+        for event in TARGETING_FIXTURE["events"]:
+            source_matches = selector.source == event["source"]
+            fields_match = AlertDataSource._event_matches(event, selector.match or {})
+            marks = [] if selector.source == "calendarCustomEvents" else selector.markFilter or []
+            marks_match = not marks or AlertDataSource._event_has_mark(event, marks)
+            if fixture_rule["enabled"] and source_matches and fields_match and marks_match:
+                matched.append(event["key"])
+
+        assert matched == fixture_rule["expectedEventKeys"], fixture_rule["id"]
+
+
+def test_legacy_title_type_compatibility_does_not_disable_real_title_filters():
+    event = {
+        "type": "buy_by",
+        "title": "OMF 매수 마감",
+        "heart": True,
+    }
+    assert AlertDataSource._event_matches(
+        event,
+        {"type": "buy_by", "titleContains": "buy-deadline"},
+    )
+    assert not AlertDataSource._event_matches(
+        event,
+        {"type": "buy_by", "titleContains": "OWL"},
+    )
+    assert not AlertDataSource._event_matches(
+        event,
+        {"type": "ex_div", "titleContains": "buy-deadline"},
+    )
 
 
 def test_calendar_selector_matches_direct_event_by_compatible_identity_and_date():

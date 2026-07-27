@@ -16,6 +16,16 @@ const TYPE_ALIASES: Record<string, string> = {
   payment: "pay",
 };
 
+// The first calendar-rule form documented these legacy event-type tokens next
+// to a free-text title field. Existing rules can therefore contain the token in
+// `titleContains` (sometimes alongside the canonical `match.type`). Treat only
+// these exact historical tokens as event types; all other title text remains a
+// real substring constraint.
+const LEGACY_SELECTOR_TITLE_TYPE_ALIASES: Record<string, string> = {
+  "buy-deadline": "buy_by",
+  "ex-dividend": "ex_div",
+};
+
 const IDENTITY_TYPE_ALIASES: Record<string, string> = {
   buy_by: "buy",
   pay: "payment",
@@ -28,6 +38,63 @@ function text(value: unknown): string {
 export function normalizeCalendarEventType(value: unknown): string {
   const raw = text(value).toLowerCase().replace(/\s+/g, "_");
   return TYPE_ALIASES[raw] ?? raw;
+}
+
+function rawSelectorTypes(match: DateEventSelector["match"] | undefined): string[] {
+  const raw = Array.isArray(match?.type) ? match.type : match?.type ? [match.type] : [];
+  return raw
+    .map((value) => value === "buy_by_minus_1" ? value : normalizeCalendarEventType(value))
+    .filter(Boolean);
+}
+
+export function legacySelectorTitleEventType(value: unknown): string {
+  const raw = text(value).toLowerCase().replace(/\s+/g, "_");
+  return LEGACY_SELECTOR_TITLE_TYPE_ALIASES[raw] ?? "";
+}
+
+function compatibleLegacySelectorTitleType(
+  match: DateEventSelector["match"] | undefined,
+): string {
+  const legacyType = legacySelectorTitleEventType(match?.titleContains);
+  if (!legacyType) return "";
+  const explicitTypes = rawSelectorTypes(match);
+  return explicitTypes.includes(legacyType)
+    ? legacyType
+    : "";
+}
+
+export function calendarSelectorMatchTypes(
+  match: DateEventSelector["match"] | undefined,
+): string[] {
+  const types = new Set(rawSelectorTypes(match));
+  const legacyType = compatibleLegacySelectorTitleType(match);
+  if (legacyType) types.add(legacyType);
+  return Array.from(types);
+}
+
+export function calendarSelectorTitleContains(
+  match: DateEventSelector["match"] | undefined,
+): string {
+  return compatibleLegacySelectorTitleType(match) ? "" : text(match?.titleContains);
+}
+
+export function normalizeCalendarDateSelector(
+  selector: DateEventSelector,
+): DateEventSelector {
+  const match = selector.match;
+  if (!match) return selector;
+  const legacyType = compatibleLegacySelectorTitleType(match);
+  if (!legacyType) return selector;
+  const types = calendarSelectorMatchTypes(match);
+  const normalizedMatch = {
+    ...match,
+    type: types,
+  };
+  delete normalizedMatch.titleContains;
+  return {
+    ...selector,
+    match: normalizedMatch,
+  };
 }
 
 function eventDate(event: CalendarRecord): string {
@@ -180,12 +247,9 @@ function selectorNotificationDates(
   deriveBuyByMinusOne: boolean,
 ): string[] {
   const match = selector.match ?? {};
-  const rawTypes = Array.isArray(match.type) ? match.type : match.type ? [match.type] : [];
-  const selectedTypes = new Set(
-    rawTypes.map((value) => value === "buy_by_minus_1" ? value : normalizeCalendarEventType(value)),
-  );
+  const selectedTypes = new Set(calendarSelectorMatchTypes(match));
   const ticker = text(match.ticker).toUpperCase();
-  const contains = text(match.titleContains).toLocaleLowerCase();
+  const contains = calendarSelectorTitleContains(match).toLocaleLowerCase();
   const identity = text(match.eventId);
   const date = text(match.date).slice(0, 10);
   const marks = selector.source === "calendarCustomEvents" ? [] : selector.markFilter ?? [];

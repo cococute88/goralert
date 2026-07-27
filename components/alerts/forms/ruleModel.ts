@@ -4,11 +4,28 @@
 
 import type { AlertKind, AlertRule, AlertTemplate, Condition, DeliveryConfig, TriggerPolicy } from "@/lib/alerts/types";
 import { generateId } from "@/lib/alerts/id";
+import { normalizeCalendarDateSelector } from "@/lib/calendar-contract";
 
 // The UI form variants (Progressive Disclosure entry points).
 export type FormKind = "date" | "ratio" | "metric" | "calendar" | "custom";
 
 const METRIC_KINDS: AlertKind[] = ["rsi", "vix", "price", "fx", "gold", "bitcoin", "koreanEtf"];
+
+function normalizeCondition(condition: Condition): Condition {
+  if ((condition.kind === "date" || condition.kind === "dividend") && condition.selector) {
+    return {
+      ...condition,
+      selector: normalizeCalendarDateSelector(condition.selector),
+    };
+  }
+  if (condition.kind === "composite") {
+    return {
+      ...condition,
+      conditions: condition.conditions.map(normalizeCondition),
+    };
+  }
+  return condition;
+}
 
 // Korean labels for the type selector cards.
 export const FORM_KIND_META: Record<FormKind, { label: string; description: string; emoji: string }> = {
@@ -54,7 +71,7 @@ export function defaultKindForForm(formKind: FormKind): AlertKind {
 // Assemble a complete AlertRule from a working draft. Timestamps are left to the
 // repository (serverTimestamp). uid comes from the signed-in user.
 export function buildRule(uid: string, draft: Partial<AlertRule>): AlertRule {
-  const condition = (draft.condition ?? { kind: "date" }) as Condition;
+  const condition = normalizeCondition((draft.condition ?? { kind: "date" }) as Condition);
   const kind = (draft.kind ?? condition.kind) as AlertKind;
   const trigger: TriggerPolicy = draft.trigger ?? { mode: "recurring" };
   const delivery: DeliveryConfig = {
@@ -80,7 +97,7 @@ export function buildRule(uid: string, draft: Partial<AlertRule>): AlertRule {
 
 // Build an AlertTemplate (⭐ 내 즐겨찾기, isBuiltIn:false) from the current draft.
 export function buildTemplateFromDraft(draft: Partial<AlertRule>): AlertTemplate {
-  const condition = (draft.condition ?? { kind: "date" }) as Condition;
+  const condition = normalizeCondition((draft.condition ?? { kind: "date" }) as Condition);
   const kind = (draft.kind ?? condition.kind) as AlertKind;
   return {
     id: generateId(),

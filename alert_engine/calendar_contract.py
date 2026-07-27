@@ -28,6 +28,11 @@ _EVENT_TYPE_ALIASES = {
     "payment": "pay",
 }
 
+_LEGACY_SELECTOR_TITLE_TYPE_ALIASES = {
+    "buy-deadline": "buy_by",
+    "ex-dividend": "ex_div",
+}
+
 _IDENTITY_EVENT_TYPE_ALIASES = {
     "buy_by": "buy",
     "pay": "payment",
@@ -42,6 +47,47 @@ def normalize_calendar_event_type(value: Any) -> str:
     """Normalize persisted/UI aliases to the event-body codes Goralert uses."""
     raw = _text(value).lower().replace(" ", "_")
     return _EVENT_TYPE_ALIASES.get(raw, raw)
+
+
+def legacy_selector_title_event_type(value: Any) -> str:
+    """Map only historical type tokens that were stored in titleContains."""
+    raw = _text(value).lower().replace(" ", "_")
+    return _LEGACY_SELECTOR_TITLE_TYPE_ALIASES.get(raw, "")
+
+
+def calendar_selector_match_types(match: Optional[Dict[str, Any]]) -> Set[str]:
+    """Return effective types, including the old title-field compatibility."""
+    match = match if isinstance(match, dict) else {}
+    raw_types = match.get("type")
+    values = raw_types if isinstance(raw_types, list) else [raw_types]
+    types = {
+        normalize_calendar_event_type(value)
+        for value in values
+        if isinstance(value, str) and value.strip()
+    }
+    legacy_type = legacy_selector_title_event_type(match.get("titleContains"))
+    if legacy_type and legacy_type in types:
+        types.add(legacy_type)
+    return types
+
+
+def calendar_selector_title_contains(match: Optional[Dict[str, Any]]) -> str:
+    """Return a real title constraint, excluding compatible legacy type tokens."""
+    match = match if isinstance(match, dict) else {}
+    contains = _text(match.get("titleContains"))
+    legacy_type = legacy_selector_title_event_type(contains)
+    types = {
+        normalize_calendar_event_type(value)
+        for value in (
+            match.get("type")
+            if isinstance(match.get("type"), list)
+            else [match.get("type")]
+        )
+        if isinstance(value, str) and value.strip()
+    }
+    if legacy_type and legacy_type in types:
+        return ""
+    return contains
 
 
 def _event_date(event: Dict[str, Any]) -> str:

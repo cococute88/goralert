@@ -3,7 +3,11 @@ import type {
   Condition,
   DateEventSelector,
 } from "@/lib/alerts/types";
-import { normalizeCalendarEventType } from "@/lib/calendar-contract";
+import {
+  calendarSelectorMatchTypes,
+  calendarSelectorTitleContains,
+  normalizeCalendarEventType,
+} from "@/lib/calendar-contract";
 import {
   buildCalendarDisplayAlertMatch,
   compareCalendarCellEvents,
@@ -19,9 +23,8 @@ export type AlertableCalendarEvent = CalendarDisplayEventLike & {
   heart: boolean;
 };
 
-function normalizedTypes(value: string | string[] | undefined): Set<string> {
-  const raw = Array.isArray(value) ? value : value ? [value] : [];
-  return new Set(raw.map((item) => {
+function normalizedTypes(match: DateEventSelector["match"] | undefined): Set<string> {
+  return new Set(calendarSelectorMatchTypes(match).map((item) => {
     const normalized = normalizeCalendarEventType(item);
     return normalized === "buy_by_minus_1" ? "buy_by" : normalized;
   }));
@@ -38,11 +41,12 @@ export function calendarSelectorMatchesEvent(
   if (match.ticker && (event.ticker ?? "").trim().toUpperCase() !== match.ticker.trim().toUpperCase()) {
     return false;
   }
-  const types = normalizedTypes(match.type);
+  const types = normalizedTypes(match);
   if (types.size > 0 && !types.has(normalizeCalendarEventType(event.type))) return false;
+  const titleContains = calendarSelectorTitleContains(match);
   if (
-    match.titleContains?.trim()
-    && !String(event.title ?? "").toLocaleLowerCase().includes(match.titleContains.trim().toLocaleLowerCase())
+    titleContains
+    && !String(event.title ?? "").toLocaleLowerCase().includes(titleContains.toLocaleLowerCase())
   ) {
     return false;
   }
