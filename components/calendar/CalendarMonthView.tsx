@@ -38,6 +38,7 @@ export type CalendarViewEvent = {
   star: boolean;
   heart: boolean;
   source: "calendarEvents" | "calendarCustomEvents";
+  portfolioId?: string;
   sourceKind?: string;
   identityKeys: string[];
 };

@@ -74,6 +74,28 @@ def test_legacy_title_type_compatibility_does_not_disable_real_title_filters():
     )
 
 
+def test_direct_selector_passes_its_pinned_portfolio_to_calendar_reader():
+    class Reader:
+        def __init__(self):
+            self.portfolio_id = None
+
+        def read_calendar_events(self, uid, portfolio_id=None):
+            self.portfolio_id = portfolio_id
+            return []
+
+    reader = Reader()
+    selector = DateEventSelector.from_dict({
+        "source": "calendarEvents",
+        "portfolioId": "income",
+        "match": {"eventId": "selected"},
+    })
+
+    AlertDataSource(firestore=reader).get_calendar_events("user-1", selector)
+
+    assert reader.portfolio_id == "income"
+    assert selector.to_dict()["portfolioId"] == "income"
+
+
 def test_calendar_selector_matches_direct_event_by_compatible_identity_and_date():
     event = {
         "id": "payload-id",

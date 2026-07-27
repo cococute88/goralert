@@ -9,12 +9,12 @@ import { useRouter } from "next/navigation";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule } from "@/lib/alerts/types";
 import { watchAlertRules } from "@/lib/alerts/repositories";
-import { loadCalendarDisplayEvents } from "@/lib/calendar-reader";
+import { loadCalendarDisplaySnapshot } from "@/lib/calendar-reader";
 import { calendarIdentityKeys } from "@/lib/calendar-contract";
 import {
   buildSingleCalendarEventDraft,
   deriveAlertedCalendarEventIds,
-  isSingleCalendarEventOccurrenceFuture,
+  isCalendarEventDatePast,
 } from "@/lib/calendar-alerts";
 import CalendarMonthView, { type CalendarViewEvent } from "@/components/calendar/CalendarMonthView";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
@@ -34,8 +34,8 @@ export default function GoralertCalendarPage() {
     let active = true;
     setLoading(true);
 
-    loadCalendarDisplayEvents(user.uid)
-      .then((calendarEvents) => {
+    loadCalendarDisplaySnapshot(user.uid)
+      .then(({ events: calendarEvents, portfolioId }) => {
         if (!active) return;
 
         const derived: CalendarViewEvent[] = calendarEvents.map((item) => ({
@@ -47,6 +47,7 @@ export default function GoralertCalendarPage() {
           star: item.star,
           heart: item.heart,
           source: item.source,
+          portfolioId,
           sourceKind: item.sourceKind,
           identityKeys: calendarIdentityKeys(item as unknown as Record<string, unknown>),
         }));
@@ -82,7 +83,7 @@ export default function GoralertCalendarPage() {
 
   const handleCreateAlert = (event: CalendarViewEvent) => {
     const draft = buildSingleCalendarEventDraft(event);
-    if (!isSingleCalendarEventOccurrenceFuture(draft)) {
+    if (isCalendarEventDatePast(event.date)) {
       toast.error("이미 지난 일정에는 새 알림을 만들 수 없습니다");
       return;
     }

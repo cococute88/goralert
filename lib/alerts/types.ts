@@ -36,6 +36,9 @@ export type CalendarMark = "star" | "heart";
 // markFilter limits to 별(star)/하트(heart) 표시 종목 (US-006/US-007).
 export type DateEventSelector = {
   source: "calendarCustomEvents" | "calendarEvents";
+  // Direct-event rules pin the portfolio that supplied the selected event.
+  // Generic rules omit this and continue following the user's active portfolio.
+  portfolioId?: string;
   match?: {
     // Direct-event rules use a compatible calendar identity plus the event date.
     // Existing broad filter rules omit these fields and keep their old behavior.

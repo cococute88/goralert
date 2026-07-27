@@ -260,11 +260,15 @@ def _active_calendar_portfolio_id(user_ref) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else DEFAULT_CALENDAR_PORTFOLIO_ID
 
 
-def _calendar_scope(uid: str):
-    """Return active portfolio refs matching Gorani Finance's repository paths."""
+def _calendar_scope(uid: str, portfolio_id: Optional[str] = None):
+    """Return selected or active portfolio refs matching Gorani repository paths."""
     db = get_db()
     user_ref = db.collection("users").document(uid)
-    portfolio_id = _active_calendar_portfolio_id(user_ref)
+    portfolio_id = (
+        portfolio_id.strip()
+        if isinstance(portfolio_id, str) and portfolio_id.strip()
+        else _active_calendar_portfolio_id(user_ref)
+    )
     if portfolio_id == DEFAULT_CALENDAR_PORTFOLIO_ID:
         return {
             "portfolio_id": portfolio_id,
@@ -283,9 +287,9 @@ def _calendar_scope(uid: str):
     }
 
 
-def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
+def read_calendar_events(uid: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Resolve Gorani generated/legacy bodies and join star/heart metadata."""
-    scope = _calendar_scope(uid)
+    scope = _calendar_scope(uid, portfolio_id)
     metadata = _read_collection(scope["metadata"])
     cache_docs = _read_collection(scope["cache"])
 
@@ -334,9 +338,9 @@ def read_calendar_events(uid: str) -> List[Dict[str, Any]]:
     return joined
 
 
-def read_calendar_custom_events(uid: str) -> List[Dict[str, Any]]:
-    """Read custom event bodies from the user's active Gorani portfolio."""
-    scope = _calendar_scope(uid)
+def read_calendar_custom_events(uid: str, portfolio_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Read custom event bodies from the selected or active Gorani portfolio."""
+    scope = _calendar_scope(uid, portfolio_id)
     raw_events = _read_collection(scope["custom"])
     events = [
         event

@@ -252,11 +252,12 @@ class AlertDataSource:
             from . import firestore_client as firestore  # lazy import
 
         source = selector.source if selector and selector.source else "calendarEvents"
+        portfolio_id = selector.portfolioId if selector else None
         try:
             if source == "calendarCustomEvents":
-                events = firestore.read_calendar_custom_events(uid)
+                events = firestore.read_calendar_custom_events(uid, portfolio_id=portfolio_id)
             else:
-                events = firestore.read_calendar_events(uid)
+                events = firestore.read_calendar_events(uid, portfolio_id=portfolio_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("calendar read failure source=%s (%s)", source, exc)
             return []

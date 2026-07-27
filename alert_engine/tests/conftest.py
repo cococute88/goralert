@@ -203,10 +203,10 @@ class FakeFirestore:
         })
 
     # calendar (READ-ONLY) -----------------------------------------------------
-    def read_calendar_events(self, uid: str):
+    def read_calendar_events(self, uid: str, portfolio_id=None):
         return self._calendar_store.read()
 
-    def read_calendar_custom_events(self, uid: str):
+    def read_calendar_custom_events(self, uid: str, portfolio_id=None):
         return self._calendar_store.read()
 
 

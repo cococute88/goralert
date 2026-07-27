@@ -184,6 +184,12 @@ async function loadCalendarDisplayTickerUniverse(
 }
 
 export async function loadCalendarDisplayEvents(uid: string): Promise<ResolvedCalendarEvent[]> {
+  return (await loadCalendarDisplaySnapshot(uid)).events;
+}
+
+export async function loadCalendarDisplaySnapshot(
+  uid: string,
+): Promise<{ events: ResolvedCalendarEvent[]; portfolioId: string }> {
   const portfolioId = await activePortfolioId(uid);
   const resolved = await loadResolvedCalendarEventsForPortfolio(uid, portfolioId);
   const universe = await loadCalendarDisplayTickerUniverse(
@@ -192,7 +198,10 @@ export async function loadCalendarDisplayEvents(uid: string): Promise<ResolvedCa
     resolved.legacyEvents,
     resolved.events,
   );
-  return filterCalendarDisplayEvents(resolved.events, universe.tickers);
+  return {
+    portfolioId,
+    events: filterCalendarDisplayEvents(resolved.events, universe.tickers),
+  };
 }
 
 export async function loadLegacyImportedCalendarEvents(uid: string): Promise<LegacyCalendarEvent[]> {

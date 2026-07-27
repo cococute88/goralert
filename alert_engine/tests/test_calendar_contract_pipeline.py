@@ -41,10 +41,10 @@ class ContractFirestore(FakeFirestore):
         )
         self.events = events
 
-    def read_calendar_events(self, uid: str):
+    def read_calendar_events(self, uid: str, portfolio_id=None):
         return list(self.events)
 
-    def read_calendar_custom_events(self, uid: str):
+    def read_calendar_custom_events(self, uid: str, portfolio_id=None):
         return list(self.events)
 
 

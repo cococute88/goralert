@@ -108,6 +108,27 @@ test("single-event draft hides mark filters and fixes identity, date, source, an
   });
 });
 
+test("named-portfolio direct rule stays pinned to its originating portfolio", () => {
+  const selected = event("income-cag", {
+    portfolioId: "income",
+    identityKeys: ["income-cag"],
+  });
+  const draft = alerts.buildSingleCalendarEventDraft(selected);
+  const directRule = rule("income-direct", draft.condition.selector);
+  const samePortfolio = event("income-cag", {
+    portfolioId: "income",
+    identityKeys: ["income-cag"],
+  });
+  const otherPortfolio = event("income-cag", {
+    portfolioId: "growth",
+    identityKeys: ["income-cag"],
+  });
+
+  assert.equal(draft.condition.selector.portfolioId, "income");
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(directRule, samePortfolio), true);
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(directRule, otherPortfolio), false);
+});
+
 test("CAG direct rule does not spread to another matching ticker/type event", () => {
   const selected = event("selected-cag");
   const other = event("other-cag", { date: "2026-08-30" });
@@ -287,4 +308,13 @@ test("single-event occurrence must still be in the future in Asia/Seoul", () => 
     ),
     false,
   );
+});
+
+test("today can enter the single-event form while a past calendar date is rejected", () => {
+  const seoulMorning = new Date("2026-07-27T01:00:00.000Z");
+  const afterDefaultTime = new Date("2026-07-27T04:00:00.000Z");
+
+  assert.equal(alerts.isCalendarEventDatePast("2026-07-27", seoulMorning), false);
+  assert.equal(alerts.isCalendarEventDatePast("2026-07-27", afterDefaultTime), false);
+  assert.equal(alerts.isCalendarEventDatePast("2026-07-26", seoulMorning), true);
 });

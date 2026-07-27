@@ -157,3 +157,26 @@ def test_named_portfolio_empty_cache_stays_empty_and_ignores_root_legacy(monkeyp
     monkeypatch.setattr(firestore_client, "get_db", lambda: FakeDb(store))
 
     assert firestore_client.read_calendar_events("u1") == []
+
+
+def test_direct_rule_can_pin_named_portfolio_after_active_portfolio_changes(monkeypatch):
+    income = ("users", "u1", "calendarPortfolios", "income")
+    growth = ("users", "u1", "calendarPortfolios", "growth")
+    store = {
+        ("users", "u1", "calendarSettings", "default"): {"activePortfolioId": "growth"},
+        (*income, "calendarCache", "TEST"): {
+            "ticker": "TEST",
+            "events": [_cache_event()],
+        },
+        (*growth, "calendarCache", "OTHER"): {
+            "ticker": "OTHER",
+            "events": [{**_cache_event(), "ticker": "OTHER"}],
+        },
+    }
+    monkeypatch.setattr(firestore_client, "get_db", lambda: FakeDb(store))
+
+    pinned = firestore_client.read_calendar_events("u1", portfolio_id="income")
+    active = firestore_client.read_calendar_events("u1")
+
+    assert [event["ticker"] for event in pinned] == ["TEST"]
+    assert [event["ticker"] for event in active] == ["OTHER"]

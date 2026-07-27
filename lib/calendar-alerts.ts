@@ -19,6 +19,7 @@ export type AlertableCalendarEvent = CalendarDisplayEventLike & {
   eventId: string;
   identityKeys: string[];
   source: "calendarEvents" | "calendarCustomEvents";
+  portfolioId?: string;
   star: boolean;
   heart: boolean;
 };
@@ -35,6 +36,7 @@ export function calendarSelectorMatchesEvent(
   event: AlertableCalendarEvent,
 ): boolean {
   if (selector.source !== event.source) return false;
+  if (selector.portfolioId && selector.portfolioId !== event.portfolioId) return false;
   const match = selector.match ?? {};
   if (match.eventId && !event.identityKeys.includes(match.eventId)) return false;
   if (match.date && match.date !== event.date) return false;
@@ -150,6 +152,7 @@ export function buildSingleCalendarEventDraft(event: AlertableCalendarEvent): Pa
       kind: "date",
       selector: {
         source: event.source,
+        ...(event.portfolioId ? { portfolioId: event.portfolioId } : {}),
         match: {
           eventId: identity,
           date: event.date,
@@ -169,6 +172,21 @@ export function buildSingleCalendarEventDraft(event: AlertableCalendarEvent): Pa
       },
     },
   };
+}
+
+export function isCalendarEventDatePast(
+  date: string,
+  now = new Date(),
+): boolean {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const today = `${values.year}-${values.month}-${values.day}`;
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) && date < today;
 }
 
 export function isSingleCalendarEventOccurrenceFuture(
