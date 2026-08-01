@@ -13,10 +13,11 @@ Firestore에는 timezone-aware `datetime`을 전달하므로 실제 저장값은
 
 ```text
 due(nextScheduledAt <= workerNow)
+  -> evaluate and render a deterministic occurrence snapshot
   -> Firestore transaction
+       re-check cursor/schedule revision and rule enabled state
        notificationLogs/{occurrenceId} create(status=processing)
        alertRules.nextScheduledAt advance
-  -> evaluate at original scheduledFor
   -> channel pending -> sending (durable) -> sent|failed
   -> sent | partial_failure | failed | skipped | delivery_unknown
 ```
@@ -62,6 +63,12 @@ due이다. 따라서 07:00 작업을 놓치고 09:19에 실행해도 07:00 회�
 - `sent`/`failed` 결과 저장 후 중단되면 해당 채널은 다시 호출하지 않는다.
 - 외부 채널 호출 후 결과 저장 전에 중단되면 Telegram/FCM에는 범용 idempotency 보장이 없으므로
   자동 재발송하지 않고 `unknown`/`delivery_unknown`으로 남긴다. 운영자가 공급자 로그를 확인한다.
+- Telegram/FCM 호출 자체가 timeout/connection loss로 끝나 공급자 수신 여부를 확정할 수 없는
+  경우에도 `failed`로 단정하거나 자동 재시도하지 않고 같은 `unknown` 정책을 적용한다.
+
+각 채널의 `pending -> sending` transaction은 occurrence lease뿐 아니라 규칙의 존재/활성 상태를
+다시 확인한다. claim 뒤 provider 호출 전에 사용자가 규칙을 삭제하거나 비활성화했다면 남은 채널은
+호출하지 않고 그 경합을 영구 상태로 기록한다.
 
 이 정책은 외부 API의 모호한 타임아웃에서 중복 발송을 막는 at-most-once 경계다. 결과를 알 수 없는
 호출을 성공으로 조작하지 않는다.
@@ -148,3 +155,7 @@ npm run test:firestore-emulator
 - 로그인 사용자의 own rule/history 읽기·쓰기 허용 및 다른 사용자 경로 차단
 
 PR에서는 `Alert Engine Firestore Emulator Tests` workflow가 동일한 테스트를 실행한다.
+
+브라우저 보안 규칙은 `nextScheduledAt`, lease/occurrence 상태, worker가 작성한 production history를
+직접 변경하지 못하게 한다. 브라우저에는 일반 규칙 편집, 명시적 schedule-change transaction,
+자체 테스트 로그만 허용되며 Admin SDK worker는 security rules를 우회하는 서비스 계정 경로를 쓴다.

@@ -87,6 +87,18 @@ def test_unknown_channel_yields_failed_result_not_exception():
     assert statuses["ghost"] == "failed"
 
 
+def test_ambiguous_provider_result_is_never_retried():
+    ambiguous = FakeChannel("telegram", status="unknown", error="network timeout")
+
+    outcome = deliver(
+        _MSG, ["telegram"], {"telegram": ambiguous}, _SETTINGS,
+        max_retries=3, sleep_fn=lambda _: None,
+    )
+
+    assert ambiguous.calls == 1
+    assert outcome.results[0].status == "unknown"
+
+
 def test_partial_failure_writes_exactly_one_log_with_all_channels():
     """Property 3: partial failure -> one log, channels length == requested length."""
     ds = FakeDataSource(ratio=30.0)

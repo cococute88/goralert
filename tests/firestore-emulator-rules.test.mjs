@@ -14,14 +14,17 @@ import {
   getDocs,
   getFirestore,
   query,
+  runTransaction,
+  serverTimestamp,
   setDoc,
+  updateDoc,
   where,
 } from "firebase/firestore";
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 const authHost = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
-test("owner rules allow durable rule/history access and reject cross-user access", {
+test("owner rules protect scheduler state and production history", {
   skip: !emulatorHost || !authHost,
 }, async () => {
   const projectId = process.env.GCLOUD_PROJECT || "demo-goralert";
@@ -40,26 +43,66 @@ test("owner rules allow durable rule/history access and reject cross-user access
     await setDoc(ruleRef, {
       uid,
       enabled: true,
-      nextScheduledAt: new Date("2026-07-31T22:00:00Z"),
       trigger: { mode: "recurring", recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" } },
     });
-    await setDoc(occurrenceRef, {
-      eventId: occurrenceRef.id,
-      ruleId: "rule",
-      status: "processing",
-      scheduledFor: "2026-07-31T22:00:00+00:00",
-    });
     assert.equal((await getDoc(ruleRef)).data().enabled, true);
+    await updateDoc(ruleRef, { enabled: false });
+    await assert.rejects(
+      () => updateDoc(ruleRef, {
+        nextScheduledAt: new Date("2026-07-31T22:00:00Z"),
+        scheduleStatus: "processing",
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      () => setDoc(occurrenceRef, {
+        id: occurrenceRef.id,
+        eventId: occurrenceRef.id,
+        ruleId: "rule",
+        isTest: false,
+        status: "processing",
+        scheduledFor: "2026-07-31T22:00:00+00:00",
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+
+    const testRef = doc(db, "users", uid, "notificationLogs", "rule:test:1");
+    await setDoc(testRef, {
+      id: testRef.id,
+      eventId: testRef.id,
+      ruleId: "rule",
+      isTest: true,
+      status: "sent",
+    });
+
+    const cancellationRef = doc(db, "users", uid, "notificationLogs", "rule:cancelled:1");
+    await runTransaction(db, async (transaction) => {
+      transaction.update(ruleRef, {
+        enabled: true,
+        trigger: { mode: "recurring", recurrence: { kind: "monthlyLastDay", time: "12:15", tz: "Asia/Seoul" } },
+        scheduleStatus: "schedule_changed",
+        scheduleChangedAt: serverTimestamp(),
+      });
+      transaction.set(cancellationRef, {
+        id: cancellationRef.id,
+        eventId: cancellationRef.id,
+        ruleId: "rule",
+        isTest: false,
+        status: "cancelled",
+        failureCode: "schedule_changed",
+      });
+    });
+
     const ownHistory = await getDocs(query(
       collection(db, "users", uid, "notificationLogs"),
       where("ruleId", "==", "rule"),
     ));
-    assert.equal(ownHistory.size, 1);
+    assert.equal(ownHistory.size, 2);
 
     const otherRule = doc(db, "users", `${uid}-other`, "alertRules", "rule");
     await assert.rejects(() => getDoc(otherRule), (error) => error?.code === "permission-denied");
     await assert.rejects(
-      () => setDoc(otherRule, { enabled: true }),
+      () => setDoc(otherRule, { uid: `${uid}-other`, enabled: true }),
       (error) => error?.code === "permission-denied",
     );
   } finally {

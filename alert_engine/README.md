@@ -21,8 +21,8 @@ GitHub Actions cron ──> python -m alert_engine.main --job-scope <scope>
         │ AlertEngine.process_rule (per rule)           │
         │  1. enabled + settings.globalEnabled gate     │
         │  2. durable cursor due gate (<= worker time)  │
-        │  3. atomically create occurrence + advance    │
-        │  4. evaluate at original scheduled time       │
+        │  3. evaluate at original scheduled time       │
+        │  4. re-check schedule, atomically claim+advance│
         │  5. persist skip/failure or channel pending   │
         │  6. channel pending -> sending -> result      │
         │  7. finalize occurrence + rule status         │

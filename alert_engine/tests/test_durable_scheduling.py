@@ -144,11 +144,11 @@ class FailBeginOnce(FakeFirestore):
         super().__init__()
         self.failed = False
 
-    def begin_channel_attempt(self, uid, event_id, channel, worker_id, attempted_at):
+    def begin_channel_attempt(self, uid, rule_id, event_id, channel, worker_id, attempted_at):
         if not self.failed:
             self.failed = True
             raise RuntimeError("simulated crash before provider call")
-        return super().begin_channel_attempt(uid, event_id, channel, worker_id, attempted_at)
+        return super().begin_channel_attempt(uid, rule_id, event_id, channel, worker_id, attempted_at)
 
 
 class FailFinalizeOnce(FakeFirestore):
@@ -171,6 +171,18 @@ class FailClaim(FakeFirestore):
 class InactiveClaim(FakeFirestore):
     def claim_occurrence(self, *args, **kwargs):
         return {"claim": "inactive", "reason": "rule_disabled", "record": None}
+
+
+class ScheduleChangedClaim(FakeFirestore):
+    def claim_occurrence(self, *args, **kwargs):
+        return {"claim": "schedule_changed", "reason": "schedule changed before occurrence claim", "record": None}
+
+
+class DisableAfterClaim(FakeFirestore):
+    def claim_occurrence(self, *args, **kwargs):
+        result = super().claim_occurrence(*args, **kwargs)
+        self.rule_enabled = False
+        return result
 
 
 def test_crash_after_provider_call_never_resends_ambiguous_channel():
@@ -276,6 +288,35 @@ def test_rule_disabled_between_query_and_claim_never_sends():
     assert result.status == STATUS_DISABLED
     assert result.detail == "rule_disabled"
     assert telegram.calls == push.calls == 0
+
+
+def test_schedule_changed_between_query_and_claim_never_sends_or_advances():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    fs = ScheduleChangedClaim()
+    engine, _, telegram, push = _engine(fs)
+
+    result = engine.process_rule(_rule("monthlyFirstDay", scheduled), now=scheduled)
+
+    assert result.status == STATUS_NOT_DUE
+    assert "schedule changed" in (result.detail or "")
+    assert telegram.calls == push.calls == 0
+    assert fs.logs == {}
+    assert fs.state_updates == []
+
+
+def test_rule_disabled_after_claim_but_before_provider_call_never_sends():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    fs = DisableAfterClaim()
+    engine, _, telegram, push = _engine(fs)
+
+    result = engine.process_rule(_rule("monthlyFirstDay", scheduled), now=scheduled)
+
+    assert result.status == STATUS_DISABLED
+    assert result.detail == "rule_disabled"
+    assert telegram.calls == push.calls == 0
+    record = next(iter(fs.logs.values()))
+    assert record["status"] == "disabled"
+    assert all(channel["status"] == "failed" for channel in record["channels"])
 
 
 def test_schedule_change_anchor_does_not_replay_new_cadence_from_creation():
@@ -393,6 +434,8 @@ def test_one_shot_calendar_rule_advances_daily_until_target_then_disables():
         ("sent", "failed", "partial_failure"),
         ("failed", "sent", "partial_failure"),
         ("failed", "failed", "failed"),
+        ("unknown", "sent", "delivery_unknown"),
+        ("sent", "unknown", "delivery_unknown"),
     ],
 )
 def test_channel_results_are_preserved(telegram_status, push_status, expected):

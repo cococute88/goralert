@@ -52,6 +52,7 @@ CALENDAR_ALERT_MARKS = "calendarAlertMarks"
 TEST_PUSH_REQUESTS = "testPushRequests"
 
 _db = None  # cached Firestore client
+_UNSET = object()
 
 
 def _init_firebase():
@@ -388,6 +389,8 @@ def claim_occurrence(
     worker_id: str,
     now: datetime,
     lease_seconds: int = 600,
+    expected_next_scheduled_at: Any = _UNSET,
+    expected_schedule_changed_at: Any = _UNSET,
 ) -> Dict[str, Any]:
     """Create or reclaim one occurrence and advance its rule atomically.
 
@@ -476,6 +479,23 @@ def claim_occurrence(
                 "reason": "rule_deleted" if not rule_snap.exists else "rule_disabled",
             }
 
+        # The browser can edit a schedule after the worker queried the rule but
+        # before this transaction begins. Never let that stale worker create an
+        # occurrence from the old definition or overwrite the edited cursor.
+        if (
+            (expected_next_scheduled_at is not _UNSET and not _same_persisted_instant(
+                rule_data.get("nextScheduledAt"), expected_next_scheduled_at,
+            ))
+            or (expected_schedule_changed_at is not _UNSET and not _same_persisted_instant(
+                rule_data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            ))
+        ):
+            return {
+                "claim": "schedule_changed",
+                "record": None,
+                "reason": "schedule changed before occurrence claim",
+            }
+
         initial = {
             **payload,
             "status": "processing",
@@ -529,23 +549,82 @@ def claim_occurrence(
     raise RuntimeError("unreachable occurrence claim state")
 
 
-def begin_channel_attempt(uid: str, event_id: str, channel: str, worker_id: str, attempted_at: datetime) -> bool:
-    """Durably change one channel from pending to sending before network I/O."""
+def _same_persisted_instant(left: Any, right: Any) -> bool:
+    """Compare Firestore Timestamp/datetime/ISO values without host timezone use."""
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, datetime) and isinstance(right, datetime):
+        left_aware = left if left.tzinfo is not None else left.replace(tzinfo=timezone.utc)
+        right_aware = right if right.tzinfo is not None else right.replace(tzinfo=timezone.utc)
+        return left_aware.astimezone(timezone.utc) == right_aware.astimezone(timezone.utc)
+    return left == right
+
+
+def begin_channel_attempt(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    channel: str,
+    worker_id: str,
+    attempted_at: datetime,
+) -> str:
+    """Atomically verify rule/lease state and mark one channel as sending.
+
+    The returned value is ``began`` or a reason that forbids provider I/O:
+    ``rule_disabled``, ``rule_deleted``, ``lease_lost``, or ``not_pending``.
+    """
     from firebase_admin import firestore
 
     db = get_db()
     ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
     transaction = db.transaction()
 
     @firestore.transactional
     def begin(transaction):
         snap = ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
         if not snap.exists:
-            return False
+            return "lease_lost"
         data = snap.to_dict() or {}
         if data.get("leaseOwner") != worker_id or data.get("status") in TERMINAL_OCCURRENCE_STATUSES:
-            return False
+            return "lease_lost"
         results = list(data.get("channels") or [])
+        if not rule_snap.exists or (rule_snap.to_dict() or {}).get("enabled") is not True:
+            reason = "rule_deleted" if not rule_snap.exists else "rule_disabled"
+            completed_at = attempted_at.astimezone(timezone.utc).isoformat()
+            for result in results:
+                if result.get("status") == "pending":
+                    result.update({
+                        "status": "failed",
+                        "error": "delivery cancelled because the rule became inactive before provider I/O",
+                        "errorCode": reason,
+                        "completedAt": completed_at,
+                    })
+            statuses = {str(result.get("status")) for result in results}
+            if "unknown" in statuses:
+                occurrence_status = "delivery_unknown"
+            elif "sent" in statuses:
+                occurrence_status = "partial_failure"
+            else:
+                occurrence_status = "cancelled" if reason == "rule_deleted" else "disabled"
+            transaction.set(ref, {
+                "channels": results,
+                "status": occurrence_status,
+                "pending": False,
+                "failureCode": reason,
+                "failureReason": "rule became inactive before the next provider call",
+                "completedAt": completed_at,
+                "leaseOwner": firestore.DELETE_FIELD,
+                "leaseExpiresAt": firestore.DELETE_FIELD,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+            if rule_snap.exists:
+                transaction.set(rule_ref, {
+                    "scheduleStatus": occurrence_status,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+            return reason
         changed = False
         for result in results:
             if result.get("channel") == channel and result.get("status") == "pending":
@@ -558,9 +637,10 @@ def begin_channel_attempt(uid: str, event_id: str, channel: str, worker_id: str,
                 break
         if changed:
             transaction.set(ref, {"channels": results, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
-        return changed
+            return "began"
+        return "not_pending"
 
-    return bool(begin(transaction))
+    return str(begin(transaction))
 
 
 def record_channel_result(uid: str, event_id: str, result: Dict[str, Any], worker_id: str) -> None:

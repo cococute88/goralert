@@ -20,10 +20,31 @@ from .models import AlertRule
 from .recurrence import (
     as_utc,
     due_occurrence,
+    get_tz,
     next_scheduled_occurrence,
     parse_datetime,
     scheduled_occurrence,
 )
+
+
+def _parse_recovery_occurrence(rule: AlertRule, scheduled_for: str) -> datetime:
+    """Validate an explicit local occurrence against the rule's exact cadence."""
+    recurrence = rule.trigger.recurrence
+    if recurrence is None:
+        raise RuntimeError("rule has no recurrence")
+    try:
+        raw = datetime.fromisoformat(scheduled_for.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("--scheduled-for must be an ISO datetime with offset") from exc
+    if raw.tzinfo is None or raw.utcoffset() is None:
+        raise RuntimeError("--scheduled-for must be an ISO datetime with offset")
+    local = raw.astimezone(get_tz(recurrence.tz))
+    if raw.replace(tzinfo=None) != local.replace(tzinfo=None) or raw.utcoffset() != local.utcoffset():
+        raise RuntimeError("--scheduled-for must use the rule timezone and its valid UTC offset")
+    expected = scheduled_occurrence(recurrence, local)
+    if expected is None or as_utc(expected) != as_utc(local):
+        raise RuntimeError("--scheduled-for is not an occurrence of the current rule schedule")
+    return local
 
 
 def _rule_rows(uid: Optional[str]) -> Iterable[tuple[str, AlertRule]]:
@@ -142,14 +163,23 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
         recurrence = rule.trigger.recurrence
         if recurrence is None:
             raise RuntimeError("rule has no recurrence")
-        parsed = parse_datetime(scheduled_for, recurrence.tz)
-        if parsed is None:
-            raise RuntimeError("--scheduled-for must be an ISO datetime with offset")
+        if not rule.enabled:
+            raise RuntimeError("refusing recovery: rule is disabled")
+        parsed = _parse_recovery_occurrence(rule, scheduled_for)
         occurrence_id = make_event_id(rule_id, parsed.isoformat())
-        log_ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(occurrence_id)
+        log_col = db.collection("users").document(uid).collection(NOTIFICATION_LOGS)
+        log_ref = log_col.document(occurrence_id)
         log_snap = log_ref.get(transaction=transaction)
         if log_snap.exists:
             raise RuntimeError(f"refusing recovery: occurrence already exists: {occurrence_id}")
+        # Legacy history could use a random document ID while keeping eventId
+        # in the payload. A direct document read alone would miss it and could
+        # authorize a duplicate delivery.
+        from google.cloud.firestore_v1 import FieldFilter
+
+        legacy_query = log_col.where(filter=FieldFilter("eventId", "==", occurrence_id)).limit(1)
+        if list(legacy_query.stream(transaction=transaction)):
+            raise RuntimeError(f"refusing recovery: legacy occurrence log already exists: {occurrence_id}")
         current = parse_datetime(rule.nextScheduledAt, recurrence.tz)
         if current is not None and parsed >= current:
             raise RuntimeError("refusing recovery: scheduled occurrence is not earlier than current cursor")

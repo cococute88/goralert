@@ -21,6 +21,7 @@ if not os.getenv("FIRESTORE_EMULATOR_HOST"):
 os.environ.setdefault("FIREBASE_PROJECT_ID", "demo-goralert")
 
 from alert_engine import firestore_client
+from alert_engine import audit
 from alert_engine.models import AlertRule
 from alert_engine.recurrence import get_tz
 
@@ -122,7 +123,7 @@ def test_real_lease_recovery_rejects_stale_finalizer_and_persists_channel_result
     with pytest.raises(RuntimeError, match="lease lost"):
         firestore_client.finalize_occurrence(uid, "rule", event_id, "sent", {}, worker_id="worker-old")
 
-    assert firestore_client.begin_channel_attempt(uid, event_id, "telegram", "worker-new", first_now)
+    assert firestore_client.begin_channel_attempt(uid, "rule", event_id, "telegram", "worker-new", first_now) == "began"
     firestore_client.record_channel_result(uid, event_id, {
         "channel": "telegram", "status": "sent", "attemptCount": 1,
         "completedAt": first_now.astimezone(timezone.utc).isoformat(),
@@ -182,3 +183,81 @@ def test_deleted_rule_is_not_resurrected_when_occurrence_finalizes():
     assert not rule_ref.get().exists
     stored = rule_ref.parent.parent.collection("notificationLogs").document(event_id).get().to_dict()
     assert stored and stored["status"] == "cancelled"
+
+
+def test_schedule_edit_between_query_and_claim_rejects_stale_occurrence():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    uid, rule_ref = _refs("rule")
+    rule_ref.set(_rule_data(
+        uid,
+        {"kind": "monthlyFirstDay", "time": "07:00", "tz": "Asia/Seoul"},
+        scheduled,
+        scheduled,
+    ))
+    changed_at = datetime(2026, 8, 1, 9, 18, tzinfo=KST)
+    rule_ref.update({
+        "trigger": {
+            "mode": "recurring",
+            "recurrence": {"kind": "monthlyLastDay", "time": "12:15", "tz": "Asia/Seoul"},
+        },
+        "nextScheduledAt": datetime(2026, 8, 31, 12, 15, tzinfo=KST),
+        "scheduleChangedAt": changed_at,
+        "scheduleStatus": "schedule_changed",
+    })
+    event_id = f"rule:{scheduled.isoformat()}"
+
+    result = firestore_client.claim_occurrence(
+        uid, "rule", event_id, _payload(event_id, scheduled),
+        datetime(2026, 9, 1, 7, 0, tzinfo=KST), "stale-worker", scheduled,
+        expected_next_scheduled_at=scheduled,
+        expected_schedule_changed_at=None,
+    )
+
+    assert result["claim"] == "schedule_changed"
+    assert not rule_ref.parent.parent.collection("notificationLogs").document(event_id).get().exists
+    stored_rule = rule_ref.get().to_dict()
+    assert stored_rule and stored_rule["scheduleChangedAt"] == changed_at.astimezone(timezone.utc)
+    assert stored_rule["nextScheduledAt"] == datetime(2026, 8, 31, 3, 15, tzinfo=timezone.utc)
+
+
+def test_disable_after_occurrence_claim_cancels_before_provider_boundary():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    uid, rule_ref = _refs("rule")
+    rule_ref.set(_rule_data(uid, {"kind": "monthlyFirstDay", "time": "07:00", "tz": "Asia/Seoul"}, scheduled, scheduled))
+    event_id = f"rule:{scheduled.isoformat()}"
+    firestore_client.claim_occurrence(
+        uid, "rule", event_id, _payload(event_id, scheduled), None,
+        "worker", scheduled,
+    )
+    rule_ref.update({"enabled": False})
+
+    outcome = firestore_client.begin_channel_attempt(
+        uid, "rule", event_id, "telegram", "worker", scheduled,
+    )
+
+    assert outcome == "rule_disabled"
+    stored = rule_ref.parent.parent.collection("notificationLogs").document(event_id).get().to_dict()
+    assert stored and stored["status"] == "disabled" and stored["pending"] is False
+    assert all(row["status"] == "failed" for row in stored["channels"])
+
+
+def test_audit_recovery_rejects_legacy_log_with_random_document_id():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    uid, rule_ref = _refs("rule")
+    rule_ref.set(_rule_data(
+        uid,
+        {"kind": "monthlyFirstDay", "time": "07:00", "tz": "Asia/Seoul"},
+        scheduled,
+        datetime(2026, 9, 1, 7, 0, tzinfo=KST),
+    ))
+    event_id = f"rule:{scheduled.isoformat()}"
+    rule_ref.parent.parent.collection("notificationLogs").document("legacy-random-id").set({
+        "eventId": event_id,
+        "ruleId": "rule",
+        "status": "sent",
+    })
+
+    with pytest.raises(SystemExit, match="legacy occurrence log already exists"):
+        audit._prepare_recovery(
+            uid, "rule", "2026-08-01T07:00:00+09:00", acknowledged=True,
+        )

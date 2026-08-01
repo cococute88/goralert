@@ -152,6 +152,8 @@ class FakeFirestore:
         self.state_updates: List[Dict[str, Any]] = []
         self.removed_push_tokens: List[str] = []
         self.calendar_writes = 0
+        self.rule_exists = True
+        self.rule_enabled = True
         self._settings = settings or AlertSettings(
             globalEnabled=True, telegramChatId="chat-123", pushTokens=["tok-1"]
         )
@@ -196,7 +198,8 @@ class FakeFirestore:
 
     def claim_occurrence(
         self, uid, rule_id, event_id, payload, next_scheduled_at, worker_id, now,
-        lease_seconds=600,
+        lease_seconds=600, expected_next_scheduled_at=None,
+        expected_schedule_changed_at=None,
     ):
         with self._lock:
             existing = self.logs.get(event_id)
@@ -239,11 +242,24 @@ class FakeFirestore:
             })
             return {"claim": "claimed", "record": record}
 
-    def begin_channel_attempt(self, uid, event_id, channel, worker_id, attempted_at):
+    def begin_channel_attempt(self, uid, rule_id, event_id, channel, worker_id, attempted_at):
         with self._lock:
             record = self.logs[event_id]
             if record.get("leaseOwner") != worker_id:
-                return False
+                return "lease_lost"
+            if not self.rule_exists or not self.rule_enabled:
+                reason = "rule_deleted" if not self.rule_exists else "rule_disabled"
+                for result in record.get("channels", []):
+                    if result.get("status") == "pending":
+                        result.update({"status": "failed", "errorCode": reason})
+                statuses = {result.get("status") for result in record.get("channels", [])}
+                record["status"] = "partial_failure" if "sent" in statuses else (
+                    "cancelled" if reason == "rule_deleted" else "disabled"
+                )
+                record["pending"] = False
+                record.pop("leaseOwner", None)
+                record.pop("leaseExpiresAt", None)
+                return reason
             for result in record.get("channels", []):
                 if result.get("channel") == channel and result.get("status") == "pending":
                     result.update({
@@ -251,8 +267,8 @@ class FakeFirestore:
                         "attemptCount": int(result.get("attemptCount") or 0) + 1,
                         "attemptedAt": attempted_at.isoformat(),
                     })
-                    return True
-            return False
+                    return "began"
+            return "not_pending"
 
     def record_channel_result(self, uid, event_id, result, worker_id):
         with self._lock:

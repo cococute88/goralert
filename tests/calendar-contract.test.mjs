@@ -156,6 +156,18 @@ test("edited schedule uses scheduleChangedAt instead of replaying from the old c
   );
 });
 
+test("malformed legacy timezone does not crash next-occurrence UI", () => {
+  const rule = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Not/A-Timezone" },
+    },
+  };
+
+  assert.equal(nextRuleOccurrence(rule, [], new Date("2026-08-01T00:20:00.000Z")), null);
+});
+
 test("direct selector requires a compatible identity and exact event date", () => {
   const rule = {
     ...metricRule("09:00"),

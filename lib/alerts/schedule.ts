@@ -239,8 +239,9 @@ export function nextRuleOccurrence(
   events: ResolvedCalendarEvent[],
   from: Date = new Date(),
 ): Date | null {
-  const recurrence = rule.trigger.recurrence;
-  const isCalendarEventRule = requiresCalendarEvent(rule.condition);
+  try {
+    const recurrence = rule.trigger.recurrence;
+    const isCalendarEventRule = requiresCalendarEvent(rule.condition);
   // Once the engine has initialized a fixed/daily-evaluation rule, this cursor
   // is authoritative. Selector-backed calendar rules keep displaying their
   // actual target event date rather than the engine's daily evaluation cursor.
@@ -274,7 +275,12 @@ export function nextRuleOccurrence(
     })
     .filter((date): date is Date => date !== null && date.getTime() >= legacyFrom.getTime())
     .sort((a, b) => a.getTime() - b.getTime());
-  return candidates[0] ?? null;
+    return candidates[0] ?? null;
+  } catch {
+    // Malformed legacy timezone/schedule data must not crash the home or list
+    // screen. The engine records the authoritative scheduling failure.
+    return null;
+  }
 }
 
 // True when the next occurrence falls on the same calendar day as `from`,

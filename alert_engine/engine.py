@@ -560,6 +560,8 @@ class AlertEngine:
             claim = self.firestore.claim_occurrence(
                 rule.uid, rule.id, event_id, placeholder.to_dict(), next_utc,
                 worker_id, as_utc(now),
+                expected_next_scheduled_at=rule.nextScheduledAt,
+                expected_schedule_changed_at=rule.scheduleChangedAt,
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(
@@ -578,6 +580,12 @@ class AlertEngine:
                 return ProcessResult(
                     rule.id, rule.uid, STATUS_DISABLED,
                     claim.get("reason") or "rule disabled or deleted before claim",
+                    eval_result.value if eval_result else None, event_id,
+                )
+            if claim_status == "schedule_changed":
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_NOT_DUE,
+                    claim.get("reason") or "schedule changed before claim",
                     eval_result.value if eval_result else None, event_id,
                 )
             return ProcessResult(
@@ -650,21 +658,29 @@ class AlertEngine:
 
             attempted_at = as_utc(now)
             try:
-                began = self.firestore.begin_channel_attempt(
-                    rule.uid, event_id, channel_name, worker_id, attempted_at,
+                begin_result = self.firestore.begin_channel_attempt(
+                    rule.uid, rule.id, event_id, channel_name, worker_id, attempted_at,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("channel claim failed occurrenceId=%s channel=%s", event_id, channel_name)
                 return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"channel claim failed: {exc}", event_id=event_id)
-            if not began:
-                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, "channel lease lost", event_id=event_id)
+            if begin_result in {"rule_disabled", "rule_deleted"}:
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_DISABLED, begin_result, event_id=event_id,
+                )
+            if begin_result != "began":
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_ERROR,
+                    "channel lease lost" if begin_result == "lease_lost" else "channel is not pending",
+                    event_id=event_id,
+                )
 
             channel = self.channels.get(channel_name)
             try:
                 if channel is None:
                     raise RuntimeError("unknown channel")
                 raw = channel.send(message, settings)
-                channel_status = raw.status if raw.status in {"sent", "failed"} else "failed"
+                channel_status = raw.status if raw.status in {"sent", "failed", "unknown"} else "failed"
                 error = raw.error
                 invalid_tokens.extend(raw.invalid_tokens)
             except Exception as exc:  # noqa: BLE001

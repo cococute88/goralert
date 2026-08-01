@@ -104,6 +104,11 @@ def _deliver_one(
         if last.ok:
             return last
 
+        # The provider may have accepted the request but its response was lost.
+        # Retrying an ambiguous attempt can duplicate a notification.
+        if last.status == "unknown":
+            return last
+
         # A credential/config failure won't recover via retry; bail early.
         if last.error and _is_permanent(last.error):
             return last
