@@ -148,17 +148,27 @@ export function validateNotificationLog(log: NotificationLog): ValidationResult 
     errors.push("message.title (non-empty) and message.body are required");
   }
 
-  if (!Array.isArray(log.channels) || log.channels.length < 1) {
-    errors.push("channels must contain at least one entry");
+  if (!Array.isArray(log.channels)) {
+    errors.push("channels must be an array");
   } else {
     for (const entry of log.channels) {
       if (!DELIVERY_CHANNELS.includes(entry.channel)) {
         errors.push(`channels contains invalid channel '${String(entry.channel)}'`);
       }
-      if (entry.status !== "sent" && entry.status !== "failed") {
-        errors.push("channel.status must be 'sent' or 'failed'");
+      if (!["pending", "sending", "sent", "failed", "unknown"].includes(entry.status)) {
+        errors.push("channel.status is invalid");
       }
     }
+  }
+
+  if (log.scheduledFor !== undefined && !isIsoTimestamp(log.scheduledFor)) {
+    errors.push("scheduledFor must be an ISO timestamp when present");
+  }
+  if (log.processingStartedAt !== undefined && !isIsoTimestamp(log.processingStartedAt)) {
+    errors.push("processingStartedAt must be an ISO timestamp when present");
+  }
+  if (log.completedAt !== undefined && !isIsoTimestamp(log.completedAt)) {
+    errors.push("completedAt must be an ISO timestamp when present");
   }
 
   if (typeof log.isTest !== "boolean") errors.push("isTest must be a boolean");

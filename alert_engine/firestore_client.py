@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import logging
 import os
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .calendar_contract import (
@@ -98,6 +100,14 @@ def get_db():
     global _db
     if _db is not None:
         return _db
+    if os.getenv("FIRESTORE_EMULATOR_HOST", "").strip():
+        from google.auth.credentials import AnonymousCredentials
+        from google.cloud import firestore as google_firestore
+
+        project_id = os.getenv("FIREBASE_PROJECT_ID", "demo-goralert").strip() or "demo-goralert"
+        _db = google_firestore.Client(project=project_id, credentials=AnonymousCredentials())
+        logger.info("Firestore Emulator client initialized project=%s", project_id)
+        return _db
     from firebase_admin import firestore  # lazy import
 
     _init_firebase()
@@ -145,13 +155,10 @@ def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
     - When ``uid`` is given: query ``users/{uid}/alertRules`` where enabled==True.
     - Otherwise: use a collection_group query across all users' ``alertRules``.
 
-    The collection_group path is most efficient with a COLLECTION_GROUP index on
-    (enabled) for the ``alertRules`` group (see ``firestore.indexes.json``). When
-    that index has not been deployed to the project, Firestore rejects the
-    filtered query with a "requires an index" error; rather than failing the
-    whole run we fall back to an unfiltered collection_group scan and filter
-    ``enabled == True`` in memory, so the engine keeps working until the index is
-    deployed (``firebase deploy --only firestore:indexes``).
+    The collection_group path requires the COLLECTION_GROUP index on ``enabled``
+    declared in ``firestore.indexes.json``. A missing index is a visible
+    infrastructure failure; we never hide it behind a whole-table scan. Durable
+    scheduled cursors catch up after the index is deployed.
     """
     db = get_db()
     rules: List[AlertRule] = []
@@ -169,26 +176,14 @@ def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
             rules.append(rule)
         return rules
 
-    # All users via collection_group. Prefer the indexed (filtered) query; on a
-    # missing-index error, fall back to an unfiltered scan + in-memory filter.
-    try:
-        group = db.collection_group(ALERT_RULES).where(filter=_enabled_filter())
-        snaps = list(group.stream())
-    except Exception as exc:  # noqa: BLE001
-        if not _is_missing_index_error(exc):
-            raise
-        logger.warning(
-            "collection-group index for alertRules.enabled is missing (%s); "
-            "falling back to an unfiltered scan + in-memory filter. Deploy "
-            "firestore.indexes.json (firebase deploy --only firestore:indexes) "
-            "to restore the efficient path.",
-            exc,
-        )
-        snaps = list(db.collection_group(ALERT_RULES).stream())
+    # All users via the indexed collection_group query. Integrity is preserved
+    # on failure because no cursor is changed until an occurrence is claimed.
+    group = db.collection_group(ALERT_RULES).where(filter=_enabled_filter())
+    snaps = list(group.stream())
 
     for snap in snaps:
         data = snap.to_dict() or {}
-        # Guard: the fallback path returns disabled rules too, so filter here.
+        # Defensive guard in case malformed data reaches the result set.
         if data.get("enabled") is not True:
             continue
         rule = AlertRule.from_dict({"id": snap.id, **data})
@@ -370,6 +365,281 @@ def read_calendar_alert_marks(uid: str) -> List[Dict[str, Any]]:
 
 
 # --- NotificationLog writes + idempotency ------------------------------------
+
+TERMINAL_OCCURRENCE_STATUSES = {
+    "sent", "partial_failure", "failed", "skipped", "cancelled",
+    "disabled", "delivery_unknown",
+}
+
+
+def get_occurrence(uid: str, event_id: str) -> Optional[Dict[str, Any]]:
+    """Load one durable occurrence by its idempotency key."""
+    db = get_db()
+    snap = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id).get()
+    return (snap.to_dict() or {}) if snap.exists else None
+
+
+def claim_occurrence(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    payload: Dict[str, Any],
+    next_scheduled_at: Optional[datetime],
+    worker_id: str,
+    now: datetime,
+    lease_seconds: int = 600,
+) -> Dict[str, Any]:
+    """Create or reclaim one occurrence and advance its rule atomically.
+
+    The transaction is the scheduler's core invariant: ``nextScheduledAt`` can
+    move only in the same commit that creates the permanent occurrence record.
+    Existing terminal records are duplicates; an expired processing lease can
+    be reclaimed after a crash. Channel states marked ``sending`` are retained
+    so a recovery worker can classify them as ambiguous without re-sending.
+    """
+    from firebase_admin import firestore
+
+    db = get_db()
+    log_ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    lease_expires = aware_now.astimezone(timezone.utc) + timedelta(seconds=max(1, lease_seconds))
+    scheduled_value: Any = payload.get("scheduledFor")
+    if isinstance(scheduled_value, str):
+        try:
+            scheduled_value = datetime.fromisoformat(scheduled_value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    @firestore.transactional
+    def claim(transaction):
+        snap = log_ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
+        rule_data = rule_snap.to_dict() or {} if rule_snap.exists else {}
+        if snap.exists:
+            data = snap.to_dict() or {}
+            status = str(data.get("status") or "processing")
+            if status in TERMINAL_OCCURRENCE_STATUSES:
+                return {"claim": "terminal", "record": data}
+            if not rule_snap.exists or rule_data.get("enabled") is not True:
+                reason = "rule_deleted" if not rule_snap.exists else "rule_disabled"
+                transaction.set(log_ref, {
+                    "status": "cancelled" if not rule_snap.exists else "disabled",
+                    "pending": False,
+                    "failureCode": reason,
+                    "failureReason": "rule was deleted or disabled after occurrence claim",
+                    "leaseOwner": firestore.DELETE_FIELD,
+                    "leaseExpiresAt": firestore.DELETE_FIELD,
+                    "completedAt": aware_now.astimezone(timezone.utc).isoformat(),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                return {"claim": "inactive", "record": data, "reason": reason}
+            current_lease = data.get("leaseExpiresAt")
+            if isinstance(current_lease, datetime):
+                if current_lease.tzinfo is None:
+                    current_lease = current_lease.replace(tzinfo=timezone.utc)
+                if current_lease > aware_now.astimezone(timezone.utc) and data.get("leaseOwner") != worker_id:
+                    return {"claim": "in_progress", "record": data}
+            attempts = int(data.get("attemptCount") or 0) + 1
+            occurrence_updates = {
+                "status": "processing",
+                "leaseOwner": worker_id,
+                "leaseExpiresAt": lease_expires,
+                "attemptCount": attempts,
+                "processingStartedAt": aware_now.astimezone(timezone.utc).isoformat(),
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+            if not data.get("scheduledFor"):
+                # Upgrade an old reserve_log placeholder without deleting its
+                # reservedAt evidence. Channels are intentionally not copied as
+                # pending: the old worker may have crossed the provider boundary.
+                occurrence_updates.update({
+                    key: value for key, value in payload.items()
+                    if key not in {"channels", "status", "attemptCount"}
+                })
+            transaction.set(log_ref, occurrence_updates, merge=True)
+            rule_updates: Dict[str, Any] = {
+                "lastOccurrenceId": event_id,
+                "lastProcessedScheduledAt": scheduled_value,
+                "scheduleStatus": "processing",
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+            if next_scheduled_at is not None:
+                rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+            transaction.set(rule_ref, rule_updates, merge=True)
+            return {"claim": "claimed", "record": {**data, "attemptCount": attempts}}
+
+        if not rule_snap.exists or rule_data.get("enabled") is not True:
+            return {
+                "claim": "inactive",
+                "record": None,
+                "reason": "rule_deleted" if not rule_snap.exists else "rule_disabled",
+            }
+
+        initial = {
+            **payload,
+            "status": "processing",
+            "pending": True,
+            "attemptCount": 1,
+            "leaseOwner": worker_id,
+            "leaseExpiresAt": lease_expires,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        transaction.create(log_ref, initial)
+        rule_updates: Dict[str, Any] = {
+            "lastOccurrenceId": event_id,
+            "lastProcessedScheduledAt": scheduled_value,
+            "scheduleStatus": "processing",
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        if next_scheduled_at is not None:
+            rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+        transaction.set(rule_ref, rule_updates, merge=True)
+        return {"claim": "claimed", "record": initial}
+
+    for contention_attempt in range(3):
+        transaction = db.transaction()
+        try:
+            return claim(transaction)
+        except ValueError as exc:
+            # The Firestore client raises ValueError after exhausting automatic
+            # ABORTED retries. Under heavy contention the winning transaction may
+            # already have created the occurrence. A read-only reconciliation must
+            # never authorize delivery, but can safely report the durable owner so
+            # the losing worker exits without turning a normal collision into a
+            # noisy job failure.
+            if "Failed to commit transaction" not in str(exc):
+                raise
+            reconciled = log_ref.get()
+            if reconciled.exists:
+                data = reconciled.to_dict() or {}
+                if str(data.get("status") or "processing") in TERMINAL_OCCURRENCE_STATUSES:
+                    return {"claim": "terminal", "record": data, "reconciledAfterContention": True}
+                return {"claim": "in_progress", "record": data, "reconciledAfterContention": True}
+            if contention_attempt == 2:
+                raise
+            # Both contenders can be aborted by the emulator's pessimistic lock.
+            # A small deterministic worker-specific stagger lets one fresh
+            # transaction commit; production contention also benefits without
+            # weakening the atomic claim invariant.
+            stagger = (sum(ord(char) for char in worker_id) % 13) / 100
+            time.sleep(0.05 * (contention_attempt + 1) + stagger)
+
+    raise RuntimeError("unreachable occurrence claim state")
+
+
+def begin_channel_attempt(uid: str, event_id: str, channel: str, worker_id: str, attempted_at: datetime) -> bool:
+    """Durably change one channel from pending to sending before network I/O."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def begin(transaction):
+        snap = ref.get(transaction=transaction)
+        if not snap.exists:
+            return False
+        data = snap.to_dict() or {}
+        if data.get("leaseOwner") != worker_id or data.get("status") in TERMINAL_OCCURRENCE_STATUSES:
+            return False
+        results = list(data.get("channels") or [])
+        changed = False
+        for result in results:
+            if result.get("channel") == channel and result.get("status") == "pending":
+                result.update({
+                    "status": "sending",
+                    "attemptCount": int(result.get("attemptCount") or 0) + 1,
+                    "attemptedAt": attempted_at.astimezone(timezone.utc).isoformat(),
+                })
+                changed = True
+                break
+        if changed:
+            transaction.set(ref, {"channels": results, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+        return changed
+
+    return bool(begin(transaction))
+
+
+def record_channel_result(uid: str, event_id: str, result: Dict[str, Any], worker_id: str) -> None:
+    """Persist one channel result without replacing sibling channel results."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def record(transaction):
+        snap = ref.get(transaction=transaction)
+        if not snap.exists:
+            raise RuntimeError(f"occurrence disappeared: {event_id}")
+        data = snap.to_dict() or {}
+        if data.get("leaseOwner") != worker_id:
+            raise RuntimeError(f"occurrence lease lost: {event_id}")
+        results = list(data.get("channels") or [])
+        for index, current in enumerate(results):
+            if current.get("channel") == result.get("channel"):
+                results[index] = {**current, **result}
+                break
+        else:
+            results.append(dict(result))
+        transaction.set(ref, {"channels": results, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+
+    record(transaction)
+
+
+def finalize_occurrence(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    status: str,
+    updates: Dict[str, Any],
+    rule_updates: Optional[Dict[str, Any]] = None,
+    worker_id: Optional[str] = None,
+) -> None:
+    """Finalize an occurrence and its denormalized rule status atomically."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    log_ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    transaction = db.transaction()
+    clean_updates = {key: value for key, value in updates.items() if value is not None}
+    clean_rule_updates = {
+        key: value for key, value in (rule_updates or {}).items() if value is not None
+    }
+
+    @firestore.transactional
+    def finalize(transaction):
+        snap = log_ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            raise RuntimeError(f"occurrence disappeared: {event_id}")
+        data = snap.to_dict() or {}
+        if worker_id is not None and data.get("leaseOwner") != worker_id:
+            raise RuntimeError(f"occurrence lease lost before finalization: {event_id}")
+        transaction.set(log_ref, {
+            **clean_updates,
+            "status": status,
+            "pending": False,
+            "leaseOwner": firestore.DELETE_FIELD,
+            "leaseExpiresAt": firestore.DELETE_FIELD,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        merged_rule_updates = {
+            "scheduleStatus": status,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+            **clean_rule_updates,
+        }
+        # A user may delete the rule after the occurrence is claimed. Finalize
+        # the permanent occurrence but never recreate a partial rule document.
+        if rule_snap.exists:
+            transaction.set(rule_ref, merged_rule_updates, merge=True)
+
+    finalize(transaction)
 
 
 def reserve_log(uid: str, event_id: str) -> bool:

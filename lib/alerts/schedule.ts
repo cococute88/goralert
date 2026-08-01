@@ -34,6 +34,22 @@ function parseHhMm(time: string | undefined): { hours: number; minutes: number }
 
 type CalendarParts = { year: number; month: number; day: number };
 
+function persistedDate(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : null;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+  if (value && typeof value === "object" && "toDate" in value) {
+    const toDate = (value as { toDate?: unknown }).toDate;
+    if (typeof toDate === "function") {
+      const parsed = toDate.call(value) as Date;
+      return parsed instanceof Date && Number.isFinite(parsed.getTime()) ? parsed : null;
+    }
+  }
+  return null;
+}
+
 // Calendar parts (year/month[1-12]/day) of an absolute instant, as seen in `tz`.
 function getDateParts(date: Date, tz: string): CalendarParts {
   const dtf = new Intl.DateTimeFormat("en-US", {
@@ -224,15 +240,29 @@ export function nextRuleOccurrence(
   from: Date = new Date(),
 ): Date | null {
   const recurrence = rule.trigger.recurrence;
-  if (recurrence?.kind !== "calendar") {
-    return nextOccurrence(rule.trigger, from);
-  }
   const isCalendarEventRule = requiresCalendarEvent(rule.condition);
+  // Once the engine has initialized a fixed/daily-evaluation rule, this cursor
+  // is authoritative. Selector-backed calendar rules keep displaying their
+  // actual target event date rather than the engine's daily evaluation cursor.
+  const persisted = persistedDate(rule.nextScheduledAt);
+  if (persisted && !(recurrence?.kind === "calendar" && isCalendarEventRule)) return persisted;
+
+  const lastProcessed = persistedDate(rule.lastProcessedScheduledAt);
+  const lastTriggered = persistedDate(rule.lastTriggeredAt);
+  const created = persistedDate(rule.createdAt);
+  const scheduleChanged = persistedDate(rule.scheduleChangedAt);
+  const legacyAnchor = scheduleChanged ?? lastProcessed ?? lastTriggered ?? created;
+  const legacyFrom = legacyAnchor
+    ? new Date(legacyAnchor.getTime() + (scheduleChanged || lastProcessed || lastTriggered ? 1 : 0))
+    : from;
+  if (recurrence?.kind !== "calendar") {
+    return nextOccurrence(rule.trigger, legacyFrom);
+  }
   if (!isCalendarEventRule) {
     // Metric forms reuse the "calendar" recurrence kind for a daily fixed
     // evaluation time. Selector-backed date/dividend rules are driven by
     // calendar event dates.
-    return nextDailyWallClockOccurrence(recurrence, from);
+    return nextDailyWallClockOccurrence(recurrence, legacyFrom);
   }
   const tz = recurrence.tz || DEFAULT_TZ;
   const { hours, minutes } = parseHhMm(recurrence.time ?? DEFAULT_TIME);
@@ -242,7 +272,7 @@ export function nextRuleOccurrence(
       if (!match) return null;
       return zonedTimeToUtc(Number(match[1]), Number(match[2]), Number(match[3]), hours, minutes, tz);
     })
-    .filter((date): date is Date => date !== null && date.getTime() >= from.getTime())
+    .filter((date): date is Date => date !== null && date.getTime() >= legacyFrom.getTime())
     .sort((a, b) => a.getTime() - b.getTime());
   return candidates[0] ?? null;
 }
@@ -258,20 +288,27 @@ export function occursToday(trigger: TriggerPolicy | undefined, from: Date = new
   return nextParts.year === fromParts.year && nextParts.month === fromParts.month && nextParts.day === fromParts.day;
 }
 
-const KO_DATETIME = new Intl.DateTimeFormat("ko-KR", {
-  month: "long",
-  day: "numeric",
-  weekday: "short",
-  hour: "2-digit",
-  minute: "2-digit",
-  timeZone: DEFAULT_TZ,
-});
+export function occurrenceIsToday(rule: AlertRule, occurrence: Date, from: Date = new Date()): boolean {
+  const tz = rule.trigger.recurrence?.tz || DEFAULT_TZ;
+  const occurrenceParts = getDateParts(occurrence, tz);
+  const fromParts = getDateParts(from, tz);
+  return occurrenceParts.year === fromParts.year
+    && occurrenceParts.month === fromParts.month
+    && occurrenceParts.day === fromParts.day;
+}
 
-// Human-readable ko-KR label for a computed next-occurrence date (Asia/Seoul).
-export function formatNextOccurrence(date: Date | null): string {
+// Human-readable ko-KR label in the rule's recurrence timezone.
+export function formatNextOccurrence(date: Date | null, tz: string = DEFAULT_TZ): string {
   if (!date) return "예정 없음";
   try {
-    return KO_DATETIME.format(date);
+    return new Intl.DateTimeFormat("ko-KR", {
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: tz,
+    }).format(date);
   } catch {
     return date.toLocaleString("ko-KR");
   }

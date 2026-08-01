@@ -12,16 +12,12 @@ import type { AlertRule, NotificationLog } from "@/lib/alerts/types";
 import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
 import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
 import { loadAlertRules, loadNotificationLogs } from "@/lib/alerts/repositories";
-import { formatNextOccurrence, nextRuleOccurrence } from "@/lib/alerts/schedule";
+import { formatNextOccurrence, nextRuleOccurrence, occurrenceIsToday } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, EmptyState } from "@/components/alerts/ui";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import AlertKindBadge from "@/components/alerts/forms/AlertKindBadge";
 
 type RuleWithNext = { rule: AlertRule; next: Date | null };
-
-function isSameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
-}
 
 function SectionTitle({ icon, title, count }: { icon: React.ReactNode; title: string; count?: number }) {
   return (
@@ -34,6 +30,7 @@ function SectionTitle({ icon, title, count }: { icon: React.ReactNode; title: st
 }
 
 function RuleRow({ rule, next }: RuleWithNext) {
+  const overdue = Boolean(next && next.getTime() < Date.now());
   return (
     <Link href={`/alerts/${rule.id}`} className="block">
       <Card className="transition-colors hover:border-accent">
@@ -44,7 +41,7 @@ function RuleRow({ rule, next }: RuleWithNext) {
               <AlertKindBadge kind={rule.kind} />
             </span>
             <span className="mt-0.5 block text-xs text-muted-foreground">
-              {next ? formatNextOccurrence(next) : "해당 조건의 예정 일정 없음"}
+              {overdue ? "처리 지연 · " : ""}{next ? formatNextOccurrence(next, rule.trigger.recurrence?.tz) : "해당 조건의 예정 일정 없음"}
             </span>
           </span>
         </CardSection>
@@ -101,11 +98,13 @@ export default function GoralertHome() {
     }));
 
     // "오늘 예정" = 다음 발송 시각이 오늘로 계산되는 (예측 가능한) 룰만.
-    const today = withNext.filter((item) => item.next !== null && isSameDay(item.next, now));
+    const today = withNext.filter((item) => item.next !== null && (
+      item.next.getTime() <= now.getTime() || occurrenceIsToday(item.rule, item.next, now)
+    ));
 
     // "다음 예정"은 고정 반복과 실제 resolve된 캘린더 일정만 포함한다.
     const scheduledUpcoming = withNext
-      .filter((item) => item.next && !isSameDay(item.next, now) && item.next.getTime() > now.getTime())
+      .filter((item) => item.next && !occurrenceIsToday(item.rule, item.next, now) && item.next.getTime() > now.getTime())
       .sort((a, b) => a.next!.getTime() - b.next!.getTime())
       .slice(0, 5);
     return { todayRules: today, upcomingRules: scheduledUpcoming };
@@ -181,7 +180,9 @@ export default function GoralertHome() {
                   </div>
                   <p className="mt-0.5 truncate text-xs text-muted-foreground">{log.message.body}</p>
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    {new Date(log.firedAt).toLocaleString("ko-KR")}
+                    {new Date(log.scheduledFor ?? log.firedAt).toLocaleString("ko-KR", {
+                      timeZone: log.timezone || "Asia/Seoul",
+                    })}
                   </p>
                 </CardSection>
               </Card>

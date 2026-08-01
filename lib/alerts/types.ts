@@ -172,6 +172,13 @@ export type AlertRule = {
   lastValue?: number | string;
   ruleVersion?: number;
   engineVersion?: string;
+  // Canonical scheduler cursor. Firestore persists a Timestamp; older rows may
+  // contain an ISO string and are normalized by schedule.ts.
+  nextScheduledAt?: unknown;
+  lastProcessedScheduledAt?: unknown;
+  lastOccurrenceId?: string;
+  scheduleStatus?: NotificationStatus | "schedule_changed" | "recovery_requested";
+  scheduleChangedAt?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -192,9 +199,23 @@ export type AlertEvent = {
 
 export type NotificationChannelResult = {
   channel: DeliveryChannel;
-  status: "sent" | "failed";
+  status: "pending" | "sending" | "sent" | "failed" | "unknown";
   error?: string;
+  errorCode?: string;
+  attemptCount?: number;
+  attemptedAt?: string;
+  completedAt?: string;
 };
+
+export type NotificationStatus =
+  | "processing"
+  | "sent"
+  | "partial_failure"
+  | "failed"
+  | "skipped"
+  | "cancelled"
+  | "disabled"
+  | "delivery_unknown";
 
 // Permanent history record (永久 보존, never deleted — UI windows the view only).
 // ruleName/tickers are denormalized search-key fields for REQ-024/REQ-044 history search.
@@ -214,6 +235,16 @@ export type NotificationLog = {
   severity?: AlertSeverity;
   ruleName?: string;
   tickers?: string[];
+  status?: NotificationStatus;
+  scheduledFor?: string;
+  timezone?: string;
+  processingStartedAt?: string;
+  completedAt?: string;
+  attemptCount?: number;
+  nextScheduledAt?: string;
+  nextScheduleUpdated?: boolean;
+  failureCode?: string;
+  failureReason?: string;
   createdAt?: unknown;
 };
 

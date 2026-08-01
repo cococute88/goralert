@@ -47,6 +47,7 @@ function RuleCard({
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const next = nextRuleOccurrence(rule, calendarEvents);
+  const overdue = Boolean(next && next.getTime() < Date.now());
 
   const handleToggle = async (value: boolean) => {
     setEnabled(value);
@@ -126,13 +127,15 @@ function RuleCard({
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               다음 예정: {next
-                ? formatNextOccurrence(next)
+                ? `${overdue ? "처리 지연 · " : ""}${formatNextOccurrence(next, rule.trigger.recurrence?.tz)}`
                 : rule.trigger.recurrence?.kind === "calendar"
                   ? "해당 조건의 예정 일정 없음"
                   : "조건 충족 시"}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              마지막 발송: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleString("ko-KR") : "없음"}
+              마지막 발송: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleString("ko-KR", {
+                timeZone: rule.trigger.recurrence?.tz || "Asia/Seoul",
+              }) : "없음"}
             </p>
           </div>
           <Toggle checked={enabled} onChange={handleToggle} label={`${rule.name} 사용`} />

@@ -137,6 +137,25 @@ test("date selector still resolves its next occurrence from calendar events", ()
   );
 });
 
+test("edited schedule uses scheduleChangedAt instead of replaying from the old cursor", () => {
+  const rule = {
+    ...metricRule("07:00"),
+    kind: "date",
+    condition: { kind: "date" },
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    lastProcessedScheduledAt: "2026-06-30T22:00:00.000Z",
+    scheduleChangedAt: "2026-08-01T00:19:00.000Z",
+  };
+
+  assert.equal(
+    nextRuleOccurrence(rule, [], new Date("2026-08-01T00:20:00.000Z"))?.toISOString(),
+    "2026-08-31T22:00:00.000Z",
+  );
+});
+
 test("direct selector requires a compatible identity and exact event date", () => {
   const rule = {
     ...metricRule("09:00"),

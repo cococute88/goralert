@@ -374,6 +374,14 @@ class AlertRule:
     lastValue: Optional[Union[float, str]] = None
     ruleVersion: Optional[int] = None
     engineVersion: Optional[str] = None
+    # Canonical scheduler cursor. Firestore stores this as a timezone-aware
+    # timestamp (UTC internally); legacy rules may omit it and are backfilled
+    # from createdAt/lastTriggeredAt by the engine.
+    nextScheduledAt: Any = None
+    lastProcessedScheduledAt: Any = None
+    lastOccurrenceId: Optional[str] = None
+    scheduleStatus: Optional[str] = None
+    scheduleChangedAt: Any = None
     createdAt: Any = None
     updatedAt: Any = None
 
@@ -401,6 +409,11 @@ class AlertRule:
             lastValue=last_value,
             ruleVersion=rule_version,
             engineVersion=_as_str(data.get("engineVersion")),
+            nextScheduledAt=data.get("nextScheduledAt"),
+            lastProcessedScheduledAt=data.get("lastProcessedScheduledAt"),
+            lastOccurrenceId=_as_str(data.get("lastOccurrenceId")),
+            scheduleStatus=_as_str(data.get("scheduleStatus")),
+            scheduleChangedAt=data.get("scheduleChangedAt"),
             createdAt=data.get("createdAt"),
             updatedAt=data.get("updatedAt"),
         )
@@ -419,6 +432,11 @@ class AlertRule:
             "lastValue": self.lastValue,
             "ruleVersion": self.ruleVersion,
             "engineVersion": self.engineVersion,
+            "nextScheduledAt": self.nextScheduledAt,
+            "lastProcessedScheduledAt": self.lastProcessedScheduledAt,
+            "lastOccurrenceId": self.lastOccurrenceId,
+            "scheduleStatus": self.scheduleStatus,
+            "scheduleChangedAt": self.scheduleChangedAt,
         })
 
 
@@ -536,11 +554,23 @@ class AlertEvent:
 @dataclass
 class ChannelResult:
     channel: str
-    status: str  # "sent" | "failed"
+    status: str  # pending | sending | sent | failed | unknown
     error: Optional[str] = None
+    errorCode: Optional[str] = None
+    attemptCount: Optional[int] = None
+    attemptedAt: Optional[str] = None
+    completedAt: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return _drop_none({"channel": self.channel, "status": self.status, "error": self.error})
+        return _drop_none({
+            "channel": self.channel,
+            "status": self.status,
+            "error": self.error,
+            "errorCode": self.errorCode,
+            "attemptCount": self.attemptCount,
+            "attemptedAt": self.attemptedAt,
+            "completedAt": self.completedAt,
+        })
 
 
 @dataclass
@@ -560,6 +590,18 @@ class NotificationLog:
     severity: Optional[str] = None
     ruleName: Optional[str] = None
     tickers: Optional[List[str]] = None
+    # Occurrence lifecycle fields. They are optional for backward compatibility
+    # with existing permanent history documents.
+    status: Optional[str] = None
+    scheduledFor: Optional[str] = None
+    timezone: Optional[str] = None
+    processingStartedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    attemptCount: Optional[int] = None
+    nextScheduledAt: Optional[str] = None
+    nextScheduleUpdated: Optional[bool] = None
+    failureCode: Optional[str] = None
+    failureReason: Optional[str] = None
     createdAt: Any = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -579,4 +621,14 @@ class NotificationLog:
             "severity": self.severity,
             "ruleName": self.ruleName,
             "tickers": self.tickers,
+            "status": self.status,
+            "scheduledFor": self.scheduledFor,
+            "timezone": self.timezone,
+            "processingStartedAt": self.processingStartedAt,
+            "completedAt": self.completedAt,
+            "attemptCount": self.attemptCount,
+            "nextScheduledAt": self.nextScheduledAt,
+            "nextScheduleUpdated": self.nextScheduleUpdated,
+            "failureCode": self.failureCode,
+            "failureReason": self.failureReason,
         })

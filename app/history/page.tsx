@@ -65,22 +65,41 @@ function Chip({
   );
 }
 
-function formatDateTime(iso: string | undefined): string {
+function formatDateTime(iso: string | undefined, timezone?: string): string {
   if (!iso) return "—";
   const parsed = new Date(iso);
   if (!Number.isFinite(parsed.getTime())) return iso;
-  return parsed.toLocaleString("ko-KR");
+  try {
+    return new Intl.DateTimeFormat("ko-KR", {
+      dateStyle: "medium",
+      timeStyle: "short",
+      timeZone: timezone || "Asia/Seoul",
+    }).format(parsed);
+  } catch {
+    return parsed.toLocaleString("ko-KR");
+  }
 }
 
 // evaluatedAt → sentAt 지연(초) 힌트.
 function delayHint(log: NotificationLog): string | null {
-  if (!log.evaluatedAt || !log.sentAt) return null;
-  const evaluated = new Date(log.evaluatedAt).getTime();
-  const sent = new Date(log.sentAt).getTime();
-  if (!Number.isFinite(evaluated) || !Number.isFinite(sent)) return null;
-  const deltaSec = Math.max(0, Math.round((sent - evaluated) / 1000));
+  if (!log.scheduledFor) return null;
+  const scheduled = new Date(log.scheduledFor).getTime();
+  const started = new Date(log.processingStartedAt ?? log.evaluatedAt).getTime();
+  if (!Number.isFinite(scheduled) || !Number.isFinite(started)) return null;
+  const deltaSec = Math.max(0, Math.round((started - scheduled) / 1000));
   return `지연 ${deltaSec}s`;
 }
+
+const STATUS_LABEL: Record<string, string> = {
+  processing: "처리 중",
+  sent: "발송 성공",
+  partial_failure: "부분 성공",
+  failed: "발송 실패",
+  skipped: "건너뜀(사유 기록됨)",
+  delivery_unknown: "발송 결과 불명",
+  cancelled: "취소",
+  disabled: "비활성화",
+};
 
 function LogRow({ log }: { log: NotificationLog }) {
   const delay = delayHint(log);
@@ -95,6 +114,11 @@ function LogRow({ log }: { log: NotificationLog }) {
               </span>
               <Badge tone="accent">{alertKindLabel(log.kind)}</Badge>
               {log.isTest ? <Badge tone="warning">테스트</Badge> : null}
+              {log.status ? (
+                <Badge tone={log.status === "sent" ? "success" : log.status === "processing" ? "warning" : "danger"}>
+                  {STATUS_LABEL[log.status] ?? log.status}
+                </Badge>
+              ) : null}
             </div>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">{log.message.body}</p>
           </div>
@@ -107,10 +131,10 @@ function LogRow({ log }: { log: NotificationLog }) {
             log.channels.map((channel) => (
               <Badge
                 key={channel.channel}
-                tone={channel.status === "sent" ? "success" : "danger"}
+                tone={channel.status === "sent" ? "success" : channel.status === "pending" || channel.status === "sending" ? "warning" : "danger"}
               >
                 {CHANNEL_LABELS[channel.channel] ?? channel.channel}{" "}
-                {channel.status === "sent" ? "성공" : "실패"}
+                {channel.status === "sent" ? "성공" : channel.status === "pending" ? "대기" : channel.status === "sending" ? "발송 중" : channel.status === "unknown" ? "결과 불명" : "실패"}
               </Badge>
             ))
           )}
@@ -120,8 +144,10 @@ function LogRow({ log }: { log: NotificationLog }) {
         </div>
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
-          <span>발송 {formatDateTime(log.firedAt)}</span>
+          <span>예정 {formatDateTime(log.scheduledFor ?? log.firedAt, log.timezone)}</span>
+          <span>처리 {formatDateTime(log.processingStartedAt ?? log.evaluatedAt, log.timezone)}</span>
           {delay ? <span>{delay}</span> : null}
+          {log.failureReason ? <span>{log.failureReason}</span> : null}
         </div>
       </CardSection>
     </Card>

@@ -27,10 +27,9 @@ on:
 permissions:
   contents: read
 
-# Constant group (NOT keyed by job-scope) so that manual workflow_dispatch runs
-# and scheduled runs SERIALIZE instead of overlapping. Overlapping runs that
-# both evaluate the same rule in the same bucket could double-send before the
-# idempotency log is written. cancel-in-progress:false => the second run queues.
+# Constant group (NOT keyed by job-scope) reduces avoidable overlap. Correctness
+# does not depend on this setting: Firestore occurrence claims and channel
+# states prevent duplicate delivery across concurrent workers.
 concurrency:
   group: goralert-alert-engine
   cancel-in-progress: false

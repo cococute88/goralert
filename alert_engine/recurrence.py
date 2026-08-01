@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import calendar as _calendar
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from zoneinfo import ZoneInfo
@@ -36,17 +36,14 @@ DEFAULT_TIME = "09:00"
 
 
 def get_tz(tz_name: Optional[str]):
-    """Resolve a tz name to a tzinfo, defaulting to Asia/Seoul, then UTC."""
+    """Resolve an IANA timezone without silently changing its meaning."""
     name = tz_name or DEFAULT_TZ
     if ZoneInfo is None:
-        return timezone.utc
+        raise RuntimeError("zoneinfo is unavailable; install tzdata")
     try:
         return ZoneInfo(name)
-    except Exception:
-        try:
-            return ZoneInfo(DEFAULT_TZ)
-        except Exception:
-            return timezone.utc
+    except Exception as exc:
+        raise ValueError(f"invalid IANA timezone: {name}") from exc
 
 
 def parse_hh_mm(time_str: Optional[str]) -> tuple[int, int]:
@@ -74,6 +71,39 @@ def _ensure_aware(dt: datetime, tz) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=tz)
     return dt.astimezone(tz)
+
+
+def parse_datetime(value: Any, tz_name: Optional[str] = None) -> Optional[datetime]:
+    """Parse Firestore Timestamp/datetime/ISO values into an aware datetime.
+
+    Firestore returns aware ``datetime`` objects.  The ISO branch exists for
+    legacy rule fields and always treats a naive value in the rule timezone,
+    never in the server's operating-system timezone.
+    """
+    if value is None:
+        return None
+    if hasattr(value, "to_datetime"):
+        try:
+            value = value.to_datetime()
+        except Exception:
+            return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+    tz = get_tz(tz_name)
+    return _ensure_aware(dt, tz)
+
+
+def as_utc(dt: datetime) -> datetime:
+    """Return a timezone-aware UTC datetime suitable for Firestore storage."""
+    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return aware.astimezone(timezone.utc)
 
 
 def _last_day_of_month(year: int, month: int) -> int:
@@ -160,6 +190,75 @@ def next_occurrence(recurrence: Optional[Recurrence], from_dt: Optional[datetime
 
     # "calendar" or unknown -> event-driven / not predictable.
     return None
+
+
+def scheduled_occurrence(
+    recurrence: Optional[Recurrence],
+    from_dt: datetime,
+) -> Optional[datetime]:
+    """Return the first scheduled wall-clock occurrence at/after ``from_dt``.
+
+    Unlike ``next_occurrence``, ``calendar`` means a daily evaluation cursor
+    here. Selector-backed calendar rules still decide whether to send by
+    evaluating the event date at this exact occurrence.
+    """
+    if recurrence is None:
+        return None
+    if recurrence.kind != "calendar":
+        return next_occurrence(recurrence, from_dt)
+    tz = get_tz(recurrence.tz)
+    base = _ensure_aware(from_dt, tz)
+    candidate = _at_time(base, recurrence.time or DEFAULT_TIME, tz)
+    if candidate < base:
+        candidate = _at_time(base + timedelta(days=1), recurrence.time or DEFAULT_TIME, tz)
+    return candidate
+
+
+def next_scheduled_occurrence(
+    recurrence: Optional[Recurrence],
+    occurrence: datetime,
+) -> Optional[datetime]:
+    """Return the occurrence strictly after ``occurrence``."""
+    return scheduled_occurrence(recurrence, occurrence + timedelta(microseconds=1))
+
+
+def due_occurrence(
+    recurrence: Optional[Recurrence],
+    now: datetime,
+    *,
+    next_scheduled_at: Any = None,
+    anchor: Any = None,
+) -> Optional[datetime]:
+    """Return the durable due occurrence, with no time-window expiry.
+
+    ``next_scheduled_at`` is the canonical Firestore cursor. Legacy rules are
+    initialized from ``anchor`` (normally creation time or the instant after
+    the last processed occurrence). Once an occurrence is in the past it stays
+    due until a permanent occurrence record is created.
+    """
+    if recurrence is None:
+        return None
+    tz = get_tz(recurrence.tz)
+    aware_now = _ensure_aware(now, tz)
+    candidate = parse_datetime(next_scheduled_at, recurrence.tz)
+    if candidate is None:
+        parsed_anchor = parse_datetime(anchor, recurrence.tz)
+        if parsed_anchor is None:
+            # Last-resort compatibility for malformed legacy rows that predate
+            # createdAt. Limit inference to the current cadence period rather
+            # than silently skipping today's already-past wall time.
+            if recurrence.kind in {"monthlyFirstDay", "monthlyLastDay"}:
+                parsed_anchor = aware_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            elif recurrence.kind == "calendar":
+                parsed_anchor = aware_now.replace(hour=0, minute=0, second=0, microsecond=0)
+            elif recurrence.kind == "biweekly":
+                parsed_anchor = aware_now - timedelta(days=14)
+            else:
+                parsed_anchor = aware_now - timedelta(days=7)
+        candidate = scheduled_occurrence(recurrence, parsed_anchor)
+    if candidate is None or candidate > aware_now:
+        return None
+    return candidate
 
 
 def due_now(

@@ -307,7 +307,10 @@ def test_non_matching_calendar_event_does_not_log_or_dispatch():
     )
 
     assert result.status == STATUS_NOT_TRIGGERED
-    assert firestore.logs == {}
+    # A scheduled occurrence that did not match is still a permanent,
+    # reasoned skip; only delivery is suppressed.
+    assert len(firestore.logs) == 1
+    assert next(iter(firestore.logs.values())).status == "skipped"
     assert push.calls == 0
     assert telegram.calls == 0
 
@@ -327,7 +330,8 @@ def test_empty_authoritative_cache_does_not_log_or_dispatch():
     )
 
     assert result.status == STATUS_NOT_TRIGGERED
-    assert firestore.logs == {}
+    assert len(firestore.logs) == 1
+    assert next(iter(firestore.logs.values())).status == "skipped"
     assert push.calls == 0
     assert telegram.calls == 0
 

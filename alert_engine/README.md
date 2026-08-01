@@ -20,15 +20,12 @@ GitHub Actions cron ──> python -m alert_engine.main --job-scope <scope>
         ┌─────────────────────────────────────────────┐
         │ AlertEngine.process_rule (per rule)           │
         │  1. enabled + settings.globalEnabled gate     │
-        │  2. recurrence "due now" gate                 │
-        │  3. evaluate condition (evaluator registry)   │
-        │  4. not triggered -> NO write (cross=lastValue)│
-        │  5. quiet-hours gate                          │
-        │  6. cooldown gate (lastTriggeredAt)           │
-        │  7. reserve-before-send (atomic eventId create)│
-        │  8. render + fan-out delivery (isolated)      │
-        │  9. finalize EXACTLY ONE NotificationLog      │
-        │ 10. update rule state; once -> disable        │
+        │  2. durable cursor due gate (<= worker time)  │
+        │  3. atomically create occurrence + advance    │
+        │  4. evaluate at original scheduled time       │
+        │  5. persist skip/failure or channel pending   │
+        │  6. channel pending -> sending -> result      │
+        │  7. finalize occurrence + rule status         │
         └─────────────────────────────────────────────┘
                               │
                               ▼
@@ -40,9 +37,12 @@ Key design properties:
 - **Firestore is the single source of truth.** The engine is **stateless** —
   all durable state (lastTriggeredAt, lastValue, enabled, logs) lives in
   Firestore. Any run can be dropped/replayed safely.
-- **Idempotent.** Every fire maps to a stable `eventId = ruleId:bucketTime`. A
-  `NotificationLog` keyed by that id means the same event is never re-sent or
-  re-logged, even across overlapping cron runs / job scopes.
+- **Durable scheduled occurrences.** Scheduled rules persist
+  `nextScheduledAt`; a due occurrence never expires. The occurrence record and
+  next cursor are committed atomically before delivery.
+- **Idempotent.** Every scheduled fire maps to a stable
+  `eventId = ruleId:scheduledWallClockTime`. Firestore create + leases prevent
+  concurrent workers from sending the same occurrence.
 - **Delivery isolation.** One channel failing (or raising) never blocks the
   others; the engine always writes exactly one log with one result per channel.
 - **Calendar is read-only.** Evaluation may READ calendar collections but never
@@ -59,7 +59,8 @@ Key design properties:
 | `evaluators/` | one evaluator per condition `kind` (metric/ratio/dividend/date/composite/custom) |
 | `channels/` | `telegram`, `push` delivery channels |
 | `compare.py` | comparator semantics (gt/gte/lt/lte/eq/crossUp/crossDown) |
-| `recurrence.py` | "due now", `next_occurrence`, `bucket_time` (Asia/Seoul) |
+| `recurrence.py` | durable due occurrence, next occurrence, timezone math |
+| `audit.py` | dry-run missing/duplicate occurrence audit + guarded recovery preparation |
 | `delivery.py` | fan-out with retry/backoff + isolation |
 | `event.py` | eventId, message rendering, event building |
 | `backtest.py` | deterministic, side-effect-free historical replay |
@@ -197,7 +198,7 @@ Tests are mapped to the design's correctness properties:
 | `GOOGLE_APPLICATION_CREDENTIALS` | path to a service-account JSON file | alt |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token | for Telegram |
 | `DEFAULT_TZ` | default IANA tz (default `Asia/Seoul`) | no |
-| `ALERT_EVAL_WINDOW_MINUTES` | eval window for due/bucket (default 30; keep >= cron cadence) | no |
+| `ALERT_EVAL_WINDOW_MINUTES` | threshold bucket and malformed-legacy fallback only; scheduled cursors do not expire | no |
 | `ALERT_DELIVERY_MAX_RETRIES` | per-channel retries (default 3) | no |
 | `ALERT_DELIVERY_BACKOFF_BASE` / `ALERT_DELIVERY_BACKOFF_MAX` | backoff seconds | no |
 

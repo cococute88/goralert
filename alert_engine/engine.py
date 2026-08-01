@@ -26,8 +26,10 @@ real implementations.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, List, Optional
 
 from .config import EngineConfig, load_config
@@ -42,9 +44,18 @@ from .models import (
     AlertSettings,
     ChannelResult,
     Condition,
+    MessageTemplate,
     NotificationLog,
 )
-from .recurrence import bucket_time, calendar_due_occurrence, due_now, get_tz, parse_hh_mm
+from .recurrence import (
+    as_utc,
+    bucket_time,
+    due_occurrence,
+    get_tz,
+    next_scheduled_occurrence,
+    parse_datetime,
+    parse_hh_mm,
+)
 
 logger = logging.getLogger("alert_engine.engine")
 
@@ -157,19 +168,14 @@ class AlertEngine:
         trigger = rule.trigger
         recurrence = trigger.recurrence if trigger else None
 
-        # 2. recurrence "due now" gate. Calendar rules use the same fixed
-        # wall-clock time selected in the UI, while their date comes from data.
-        calendar_occurrence = None
+        # Scheduled rules use a durable occurrence cursor. They must never use
+        # a sliding evaluation window: a past cursor remains due until a
+        # permanent occurrence record is atomically created.
         if recurrence is not None:
-            if recurrence.kind == "calendar":
-                calendar_occurrence = calendar_due_occurrence(
-                    recurrence, now, self.config.eval_window_minutes,
-                )
-                is_due = calendar_occurrence is not None
-            else:
-                is_due = due_now(recurrence, now, self.config.eval_window_minutes)
-            if not is_due:
-                return ProcessResult(rule.id, rule.uid, STATUS_NOT_DUE, "recurrence not due")
+            return self._process_scheduled_rule(rule, now, settings, dry_run)
+
+        # Unscheduled threshold rules retain their existing evaluation path.
+        calendar_occurrence = None
 
         # 3. evaluate
         if rule.condition is None:
@@ -264,7 +270,7 @@ class AlertEngine:
             channel_registry=self.channels,
             settings=settings,
         )
-        sent_at = datetime.now(timezone.utc).isoformat() if outcome.any_sent else None
+        sent_at = as_utc(now).isoformat() if outcome.any_sent else None
         event.sentAt = sent_at
 
         # 9. finalize the reserved NotificationLog (overwrites the reservation)
@@ -305,6 +311,446 @@ class AlertEngine:
         self._cleanup_invalid_push_tokens(rule.uid, rule.id, outcome.invalid_push_tokens)
 
         return ProcessResult(rule.id, rule.uid, STATUS_DELIVERED, eval_result.detail, eval_result.value, event_id, log)
+
+    def _process_scheduled_rule(
+        self,
+        rule: AlertRule,
+        now: datetime,
+        settings: AlertSettings,
+        dry_run: bool,
+    ) -> ProcessResult:
+        """Process one durable recurring occurrence.
+
+        The occurrence is identified by ``ruleId + scheduledFor``. Its
+        NotificationLog placeholder and the rule's next cursor are committed in
+        one Firestore transaction before any delivery call. A missed occurrence
+        therefore remains due indefinitely, and a crash can leave only an
+        explicit processing/unknown record—not a silent hole.
+        """
+        trigger = rule.trigger
+        recurrence = trigger.recurrence
+        assert recurrence is not None
+        timezone_name = recurrence.tz or self.config.default_tz
+
+        resume_record = None
+        resume_event_id = None
+        if rule.scheduleStatus == "processing" and rule.lastOccurrenceId:
+            try:
+                resume_record = self.firestore.get_occurrence(rule.uid, rule.lastOccurrenceId)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("pending occurrence load failed occurrenceId=%s", rule.lastOccurrenceId)
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"pending occurrence load failed: {exc}")
+            if resume_record and resume_record.get("status") not in {
+                "sent", "partial_failure", "failed", "skipped", "cancelled",
+                "disabled", "delivery_unknown",
+            }:
+                resume_event_id = rule.lastOccurrenceId
+            elif resume_record and resume_record.get("status"):
+                # The log commit succeeded but the denormalized rule status was
+                # stale (for example, a client cached an older snapshot). Repair
+                # it idempotently without touching delivery.
+                try:
+                    self.firestore.finalize_occurrence(
+                        rule.uid, rule.id, rule.lastOccurrenceId,
+                        str(resume_record["status"]), {}, {},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"schedule status repair failed: {exc}")
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_DUPLICATE,
+                    "terminal occurrence already recorded", event_id=rule.lastOccurrenceId,
+                )
+
+        # Legacy rules have no cursor. Reconstruct their first unprocessed
+        # occurrence from durable history fields, never from a sliding window.
+        anchor = rule.createdAt
+        schedule_changed = parse_datetime(rule.scheduleChangedAt, timezone_name)
+        last_processed = parse_datetime(rule.lastProcessedScheduledAt, timezone_name)
+        if schedule_changed is not None:
+            # The browser transaction records cancellation of the prior cursor
+            # and removes it. Start the edited schedule at/after the edit commit,
+            # never by replaying the new cadence from the rule's creation date.
+            anchor = schedule_changed
+        elif last_processed is not None:
+            anchor = last_processed + timedelta(microseconds=1)
+        elif rule.lastTriggeredAt:
+            last_triggered = parse_datetime(rule.lastTriggeredAt, timezone_name)
+            if last_triggered is not None:
+                anchor = last_triggered + timedelta(microseconds=1)
+        if anchor is None:
+            # Only malformed legacy documents lack every durable anchor. Keep a
+            # bounded compatibility inference for those rows; normal rules use
+            # createdAt or the canonical cursor and never expire by this window.
+            anchor = now - timedelta(minutes=self.config.eval_window_minutes)
+
+        try:
+            scheduled_for = (
+                parse_datetime(resume_record.get("scheduledFor"), timezone_name)
+                if resume_event_id and resume_record
+                else due_occurrence(
+                    recurrence,
+                    now,
+                    next_scheduled_at=rule.nextScheduledAt,
+                    anchor=anchor,
+                )
+            )
+        except Exception as exc:  # invalid timezone/schedule
+            logger.exception(
+                "schedule resolution failed alertId=%s ruleId=%s timezone=%s workerAt=%s",
+                rule.id, rule.id, timezone_name, as_utc(now).isoformat(),
+            )
+            event_id = f"{rule.id}:schedule-error:{as_utc(now).date().isoformat()}"
+            if not dry_run:
+                failure_log = NotificationLog(
+                    id=event_id,
+                    eventId=event_id,
+                    ruleId=rule.id,
+                    kind=rule.kind,
+                    firedAt=as_utc(now).isoformat(),
+                    evaluatedAt=as_utc(now).isoformat(),
+                    message=render_message(rule, {"name": rule.name}),
+                    channels=[],
+                    isTest=False,
+                    ruleName=rule.name,
+                    status="failed",
+                    timezone=timezone_name,
+                    processingStartedAt=as_utc(now).isoformat(),
+                    completedAt=as_utc(now).isoformat(),
+                    attemptCount=1,
+                    failureCode="invalid_schedule_or_timezone",
+                    failureReason=str(exc),
+                )
+                try:
+                    self.firestore.write_notification_log(rule.uid, failure_log)
+                except Exception:  # noqa: BLE001
+                    logger.exception("schedule failure record write failed ruleId=%s", rule.id)
+            return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"schedule resolution failed: {exc}", event_id=event_id)
+        if scheduled_for is None:
+            logger.info(
+                "due decision alertId=%s ruleId=%s due=false nextScheduledAt=%s timezone=%s workerAt=%s",
+                rule.id, rule.id, rule.nextScheduledAt, timezone_name, as_utc(now).isoformat(),
+            )
+            return ProcessResult(rule.id, rule.uid, STATUS_NOT_DUE, "durable occurrence cursor is in the future")
+
+        # A selector-backed one-shot calendar alert evaluates daily until its
+        # target event date, then disables only after delivery. Advancing its
+        # daily cursor on non-matching days is therefore required.
+        should_advance = trigger.mode == "recurring" or (
+            recurrence.kind == "calendar"
+            and rule.condition is not None
+            and _has_calendar_selector(rule.condition)
+        )
+        next_scheduled = next_scheduled_occurrence(recurrence, scheduled_for) if should_advance else None
+        scheduled_utc = as_utc(scheduled_for)
+        next_utc = as_utc(next_scheduled) if next_scheduled is not None else None
+        occurrence_bucket = scheduled_for.isoformat()
+        event_id = resume_event_id or make_event_id(rule.id, occurrence_bucket)
+        worker_id = uuid.uuid4().hex
+        processing_started = as_utc(now).isoformat()
+        delay_seconds = max(0, int((as_utc(now) - scheduled_utc).total_seconds()))
+
+        logger.info(
+            "due decision alertId=%s ruleId=%s occurrenceId=%s due=true scheduledFor=%s "
+            "timezone=%s workerAt=%s delaySeconds=%d nextBefore=%s nextAfter=%s",
+            rule.id, rule.id, event_id, scheduled_utc.isoformat(), timezone_name,
+            processing_started, delay_seconds, rule.nextScheduledAt,
+            next_utc.isoformat() if next_utc else None,
+        )
+
+        skip_status = None
+        skip_code = None
+        skip_reason = None
+        if resume_record:
+            # Evaluation and message rendering completed before the original
+            # reservation. Recovery must use that durable snapshot instead of
+            # querying mutable market/calendar data again.
+            eval_result = SimpleNamespace(
+                triggered=True,
+                value=resume_record.get("evaluatedValue"),
+                detail="resumed durable occurrence",
+            )
+            stored_message = resume_record.get("message") or {}
+            message = MessageTemplate(
+                title=str(stored_message.get("title") or rule.name),
+                body=str(stored_message.get("body") or rule.name),
+            )
+            skip_code = resume_record.get("failureCode")
+            skip_reason = resume_record.get("failureReason")
+            if skip_code:
+                skip_status = "failed" if skip_code in {
+                    "evaluation_error", "invalid_schedule_or_timezone",
+                } else "skipped"
+        else:
+            # Evaluate at the original scheduled wall-clock instant. This is
+            # essential for a 07:00 Asia/Seoul occurrence recovered at 09:19
+            # and for calendar selectors crossing a UTC date boundary.
+            eval_result = None
+            eval_error = None
+            ctx = None
+            if rule.condition is None:
+                eval_error = "rule has no condition"
+            else:
+                evaluator = self.evaluators.get(rule.condition.kind)
+                if evaluator is None:
+                    eval_error = f"no evaluator for kind={rule.condition.kind}"
+                else:
+                    prev_value = rule.lastValue if isinstance(rule.lastValue, (int, float)) else None
+                    ctx = EvalContext(uid=rule.uid, now=scheduled_for, prev_value=prev_value, settings=settings)
+                    try:
+                        eval_result = evaluator.evaluate(rule, rule.condition, ctx)
+                    except Exception as exc:  # noqa: BLE001
+                        eval_error = f"evaluator exception: {type(exc).__name__}: {exc}"
+
+            variables = {
+                "ticker": (ctx.extra.get("ticker") if ctx else None) or self._primary_ticker(rule),
+                "value": eval_result.value if eval_result else None,
+                "threshold": rule.condition.threshold if rule.condition else None,
+                "name": rule.name,
+            }
+            message = render_message(rule, variables)
+
+            if eval_error:
+                skip_status, skip_code, skip_reason = "failed", "evaluation_error", eval_error
+            elif not eval_result.triggered:
+                skip_status, skip_code, skip_reason = "skipped", "condition_not_met", eval_result.detail
+            elif _within_quiet_hours(trigger.quietHours, now):
+                skip_status, skip_code, skip_reason = "skipped", "quiet_hours", "within quiet hours"
+            elif trigger.cooldownMinutes:
+                last = _parse_iso(rule.lastTriggeredAt)
+                if last is not None and now - last < timedelta(minutes=trigger.cooldownMinutes):
+                    skip_status, skip_code, skip_reason = "skipped", "cooldown", "within cooldown"
+
+        pending_channels = [] if skip_status else [
+            ChannelResult(channel, "pending", attemptCount=0) for channel in rule.delivery.channels
+        ]
+        placeholder = NotificationLog(
+            id=event_id,
+            eventId=event_id,
+            ruleId=rule.id,
+            kind=rule.kind,
+            firedAt=processing_started,
+            evaluatedAt=processing_started,
+            evaluatedValue=eval_result.value if eval_result else None,
+            message=message,
+            channels=pending_channels,
+            isTest=False,
+            ruleName=rule.name,
+            tickers=self._tickers(rule) or None,
+            status="processing",
+            scheduledFor=scheduled_utc.isoformat(),
+            timezone=timezone_name,
+            processingStartedAt=processing_started,
+            attemptCount=1,
+            nextScheduledAt=next_utc.isoformat() if next_utc else None,
+            nextScheduleUpdated=True,
+            failureCode=skip_code,
+            failureReason=skip_reason,
+        )
+
+        if dry_run:
+            return ProcessResult(
+                rule.id, rule.uid, STATUS_DRY_RUN,
+                f"scheduledFor={scheduled_utc.isoformat()} delaySeconds={delay_seconds}",
+                eval_result.value if eval_result else None, event_id,
+            )
+
+        # No best-effort fallback is allowed here. Delivery without an atomic
+        # reservation would re-open the duplicate-send race.
+        try:
+            claim = self.firestore.claim_occurrence(
+                rule.uid, rule.id, event_id, placeholder.to_dict(), next_utc,
+                worker_id, as_utc(now),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "occurrence claim failed alertId=%s ruleId=%s occurrenceId=%s scheduledFor=%s",
+                rule.id, rule.id, event_id, scheduled_utc.isoformat(),
+            )
+            return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"occurrence claim failed: {exc}", event_id=event_id)
+
+        claim_status = claim.get("claim")
+        logger.info(
+            "claim result alertId=%s ruleId=%s occurrenceId=%s claim=%s",
+            rule.id, rule.id, event_id, claim_status,
+        )
+        if claim_status != "claimed":
+            if claim_status == "inactive":
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_DISABLED,
+                    claim.get("reason") or "rule disabled or deleted before claim",
+                    eval_result.value if eval_result else None, event_id,
+                )
+            return ProcessResult(
+                rule.id, rule.uid, STATUS_DUPLICATE,
+                "occurrence terminal" if claim_status == "terminal" else "occurrence owned by another worker",
+                eval_result.value if eval_result else None, event_id,
+            )
+
+        completed_at = as_utc(now).isoformat()
+        if skip_status:
+            try:
+                self.firestore.finalize_occurrence(
+                    rule.uid, rule.id, event_id, skip_status,
+                    {
+                        "completedAt": completed_at,
+                        "failureCode": skip_code,
+                        "failureReason": skip_reason,
+                    },
+                    {"engineVersion": self.config.engine_version},
+                    worker_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("occurrence finalization failed occurrenceId=%s", event_id)
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"finalization failed: {exc}", event_id=event_id)
+            result_status = STATUS_ERROR if skip_status == "failed" else STATUS_NOT_TRIGGERED
+            return ProcessResult(
+                rule.id, rule.uid, result_status, skip_reason,
+                eval_result.value if eval_result else None, event_id, placeholder,
+            )
+
+        # On recovery, a channel left in "sending" crossed an unknowable crash
+        # boundary. Re-sending could duplicate a Telegram/FCM notification, so
+        # classify it as unknown and require explicit operator review.
+        claimed_record = claim.get("record", {})
+        if claimed_record.get("reservedAt") and not claimed_record.get("channels"):
+            # Reservations written by engine <=2.1.0 did not persist a channel
+            # state before delivery. Their provider boundary is unknowable.
+            claimed_channel_rows = [
+                {"channel": channel, "status": "sending", "attemptCount": 1}
+                for channel in rule.delivery.channels
+            ]
+        else:
+            claimed_channel_rows = claimed_record.get("channels") or placeholder.to_dict()["channels"]
+        stored_channels = {
+            item.get("channel"): dict(item)
+            for item in claimed_channel_rows
+        }
+        results: List[ChannelResult] = []
+        invalid_tokens: List[str] = []
+        sent_at = None
+        for channel_name in rule.delivery.channels:
+            previous = stored_channels.get(channel_name, {"channel": channel_name, "status": "pending"})
+            if previous.get("status") in {"sent", "failed", "unknown"}:
+                results.append(ChannelResult(
+                    channel_name, previous["status"], previous.get("error"),
+                    previous.get("errorCode"), previous.get("attemptCount"),
+                    previous.get("attemptedAt"), previous.get("completedAt"),
+                ))
+                continue
+            if previous.get("status") == "sending":
+                result = ChannelResult(
+                    channel_name, "unknown",
+                    "worker stopped after delivery began; not retried to prevent duplicate delivery",
+                    "ambiguous_delivery", int(previous.get("attemptCount") or 1),
+                    previous.get("attemptedAt"), completed_at,
+                )
+                self.firestore.record_channel_result(rule.uid, event_id, result.to_dict(), worker_id)
+                results.append(result)
+                continue
+
+            attempted_at = as_utc(now)
+            try:
+                began = self.firestore.begin_channel_attempt(
+                    rule.uid, event_id, channel_name, worker_id, attempted_at,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("channel claim failed occurrenceId=%s channel=%s", event_id, channel_name)
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"channel claim failed: {exc}", event_id=event_id)
+            if not began:
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, "channel lease lost", event_id=event_id)
+
+            channel = self.channels.get(channel_name)
+            try:
+                if channel is None:
+                    raise RuntimeError("unknown channel")
+                raw = channel.send(message, settings)
+                channel_status = raw.status if raw.status in {"sent", "failed"} else "failed"
+                error = raw.error
+                invalid_tokens.extend(raw.invalid_tokens)
+            except Exception as exc:  # noqa: BLE001
+                channel_status = "failed"
+                error = f"worker exception: {type(exc).__name__}: {exc}"
+            result_completed = as_utc(now).isoformat()
+            error_code = self._delivery_error_code(channel_name, error)
+            result = ChannelResult(
+                channel_name, channel_status, error, error_code, 1,
+                attempted_at.isoformat(), result_completed,
+            )
+            try:
+                self.firestore.record_channel_result(rule.uid, event_id, result.to_dict(), worker_id)
+            except Exception as exc:  # noqa: BLE001
+                # The durable state is still "sending". A recovery worker will
+                # mark it unknown and will not call the provider again.
+                logger.exception(
+                    "channel result persistence failed occurrenceId=%s channel=%s status=%s",
+                    event_id, channel_name, channel_status,
+                )
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"channel result write failed: {exc}", event_id=event_id)
+            results.append(result)
+            if channel_status == "sent" and sent_at is None:
+                sent_at = result_completed
+            logger.info(
+                "channel result alertId=%s ruleId=%s occurrenceId=%s channel=%s status=%s errorCode=%s",
+                rule.id, rule.id, event_id, channel_name, channel_status, error_code,
+            )
+
+        statuses = [result.status for result in results]
+        if statuses and all(status == "sent" for status in statuses):
+            occurrence_status = "sent"
+        elif "unknown" in statuses:
+            occurrence_status = "delivery_unknown"
+        elif "sent" in statuses:
+            occurrence_status = "partial_failure"
+        else:
+            occurrence_status = "failed"
+        completed_at = as_utc(now).isoformat()
+        rule_updates = {
+            "engineVersion": self.config.engine_version,
+            "lastValue": eval_result.value,
+        }
+        if sent_at:
+            rule_updates["lastTriggeredAt"] = processing_started
+        if trigger.mode == "once":
+            rule_updates["enabled"] = False
+        try:
+            self.firestore.finalize_occurrence(
+                rule.uid, rule.id, event_id, occurrence_status,
+                {
+                    "completedAt": completed_at,
+                    "sentAt": sent_at,
+                    "failureCode": "delivery_unknown" if occurrence_status == "delivery_unknown" else None,
+                    "failureReason": (
+                        "at least one channel crossed an ambiguous crash boundary"
+                        if occurrence_status == "delivery_unknown" else None
+                    ),
+                },
+                rule_updates,
+                worker_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("occurrence finalization failed occurrenceId=%s", event_id)
+            return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"finalization failed: {exc}", event_id=event_id)
+
+        self._cleanup_invalid_push_tokens(rule.uid, rule.id, invalid_tokens)
+        log = NotificationLog(
+            **{
+                **placeholder.__dict__,
+                "channels": results,
+                "status": occurrence_status,
+                "sentAt": sent_at,
+                "completedAt": completed_at,
+                "failureCode": "delivery_unknown" if occurrence_status == "delivery_unknown" else None,
+                "failureReason": (
+                    "at least one channel crossed an ambiguous crash boundary"
+                    if occurrence_status == "delivery_unknown" else None
+                ),
+            }
+        )
+        return ProcessResult(
+            rule.id, rule.uid, STATUS_DELIVERED,
+            f"occurrence={occurrence_status} scheduledFor={scheduled_utc.isoformat()} delaySeconds={delay_seconds}",
+            eval_result.value, event_id, log,
+        )
 
     # --- test send -----------------------------------------------------------
 
@@ -385,6 +831,19 @@ class AlertEngine:
         return log
 
     # --- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _delivery_error_code(channel: str, error: Optional[str]) -> Optional[str]:
+        if not error:
+            return None
+        lower = error.lower()
+        if "network" in lower or "timeout" in lower or "connection" in lower:
+            return f"{channel}_network_error"
+        if "token" in lower or "credential" in lower or "auth" in lower or "chatid" in lower:
+            return f"{channel}_auth_error"
+        if "unknown channel" in lower:
+            return "unknown_channel"
+        return f"{channel}_provider_error"
 
     def _cleanup_invalid_push_tokens(self, uid: str, rule_id: str, tokens: List[str]) -> None:
         if not tokens:
