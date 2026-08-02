@@ -116,6 +116,22 @@ def test_drain_skips_when_no_credentials():
     assert fs.marks[0]["status"] == "failed"
 
 
+def test_drain_respects_global_disabled_before_channel_delivery():
+    fs = QueueFirestore(
+        [{"id": "req-off", "uid": "u1", "status": "pending", "channels": ["push"]}],
+        settings=AlertSettings(globalEnabled=False, pushTokens=["tok-1"]),
+    )
+    push = FakeChannel("push", status="sent")
+
+    counts = test_push.process_test_requests(engine=_engine(fs, push), firestore=fs)
+
+    assert counts == {"processed": 1, "sent": 0, "failed": 1, "error": 0}
+    assert push.calls == 0
+    assert fs.logs == {}
+    assert fs.marks[0]["status"] == "failed"
+    assert fs.marks[0]["error"] == "global alerts are disabled"
+
+
 def test_drain_isolates_one_bad_request():
     fs = QueueFirestore(
         [

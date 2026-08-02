@@ -182,9 +182,7 @@ class AlertDataSource:
 
         for field in ("Close", "Adj Close"):
             payload = None
-            if field in data.columns:
-                payload = data[field]
-            elif isinstance(data.columns, pd.MultiIndex):
+            if isinstance(data.columns, pd.MultiIndex):
                 exact = [
                     column for column in data.columns
                     if field in tuple(str(part) for part in column)
@@ -198,6 +196,8 @@ class AlertDataSource:
                     payload = data.loc[:, matches[0]]
                 elif len(matches) > 1:
                     return None, field, "ambiguous"
+            elif field in data.columns:
+                payload = data[field]
             if payload is None:
                 continue
             if isinstance(payload, pd.DataFrame):

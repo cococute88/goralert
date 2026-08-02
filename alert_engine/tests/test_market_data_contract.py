@@ -68,6 +68,42 @@ def test_single_symbol_multiindex_close_is_normalized(monkeypatch):
     assert result.metadata["priceField"] == "Close"
 
 
+def test_multiindex_selects_requested_symbol_when_other_symbol_is_present(monkeypatch):
+    index = pd.date_range(end=NOW - timedelta(hours=1), periods=2, freq="D", tz="UTC")
+    frame = pd.DataFrame(
+        [[99.0, 59.0], [101.5, 61.25]],
+        index=index,
+        columns=pd.MultiIndex.from_tuples(
+            [("Close", "MSFT"), ("Close", "SCHD")],
+            names=["Price", "Ticker"],
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame))
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "ok"
+    assert result.value == pytest.approx(101.5)
+
+
+def test_ambiguous_flat_close_columns_are_rejected(monkeypatch):
+    index = pd.date_range(end=NOW - timedelta(hours=1), periods=2, freq="D", tz="UTC")
+    frame = pd.DataFrame(
+        [[99.0, 59.0], [101.5, 61.25]],
+        index=index,
+        columns=["Close", "Close"],
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame))
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert (result.status, result.code) == ("provider_error", "malformed_response")
+
+
 def test_reversed_multiindex_and_adj_close_only_are_supported(monkeypatch):
     index = pd.date_range(end=NOW - timedelta(hours=1), periods=2, freq="D", tz="UTC")
     reversed_frame = pd.DataFrame(
@@ -107,6 +143,28 @@ def test_mixed_string_numeric_close_keeps_usable_rows(monkeypatch):
 
     assert result.status == "ok"
     assert result.value == pytest.approx(101.0)
+
+
+def test_close_normalization_sorts_deduplicates_and_accepts_naive_time(monkeypatch):
+    duplicate = datetime(2026, 8, 1, 0, 0)
+    frame = pd.DataFrame(
+        {"Close": ["101.5", math.nan, "100.25", "102.0"]},
+        index=pd.DatetimeIndex([
+            duplicate,
+            datetime(2026, 7, 31, 0, 0),
+            datetime(2026, 7, 30, 0, 0),
+            duplicate,
+        ]),
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame))
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "ok"
+    assert result.value == pytest.approx(102.0)
+    assert result.observed_at == datetime(2026, 8, 1, tzinfo=timezone.utc)
 
 
 @pytest.mark.parametrize(

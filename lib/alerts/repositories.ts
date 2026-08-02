@@ -438,7 +438,7 @@ export async function deleteAlertTemplate(uid: string, id: string): Promise<void
 // --- AlertSettings -----------------------------------------------------------
 
 export async function loadAlertSettings(uid: string): Promise<AlertSettings> {
-  if (!firestoreDb) return defaultAlertSettings();
+  if (!firestoreDb) throw new Error("Firebase is not configured");
   const snap = await getDoc(alertSettingsDoc(firestoreDb, uid));
   if (!snap.exists()) return defaultAlertSettings();
   return normalizeAlertSettings(snap.data());
@@ -446,16 +446,23 @@ export async function loadAlertSettings(uid: string): Promise<AlertSettings> {
 
 export function watchAlertSettings(
   uid: string,
-  onChange: (settings: AlertSettings) => void,
+  onChange: (
+    settings: AlertSettings,
+    metadata: { hasPendingWrites: boolean },
+  ) => void,
   onError?: (error: Error) => void,
 ): () => void {
   if (!firestoreDb) {
-    onChange(defaultAlertSettings());
+    onError?.(new Error("Firebase is not configured"));
     return () => {};
   }
   return onSnapshot(
     alertSettingsDoc(firestoreDb, uid),
-    (snap) => onChange(snap.exists() ? normalizeAlertSettings(snap.data()) : defaultAlertSettings()),
+    { includeMetadataChanges: true },
+    (snap) => onChange(
+      snap.exists() ? normalizeAlertSettings(snap.data()) : defaultAlertSettings(),
+      { hasPendingWrites: snap.metadata.hasPendingWrites },
+    ),
     (error) => onError?.(error),
   );
 }
@@ -477,8 +484,11 @@ export function watchAlertRules(
 }
 
 export async function saveAlertSettings(uid: string, partial: Partial<AlertSettings>): Promise<void> {
+  const updates = Object.fromEntries(
+    Object.entries(partial).map(([key, value]) => [key, value === undefined ? deleteField() : value]),
+  );
   const payload = sanitizeFirestorePayload({
-    ...partial,
+    ...updates,
     updatedAt: serverTimestamp(),
   });
   await setDoc(alertSettingsDoc(requireDb(), uid), payload, { merge: true });

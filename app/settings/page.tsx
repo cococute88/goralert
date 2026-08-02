@@ -9,7 +9,7 @@
 //   - 채널 테스트(REQ-039): testPushRequests 큐에 요청을 넣으면 Python 엔진이
 //     운영과 동일한 경로(send_test_alert → PushChannel)로 발송하고 isTest 로그를 남김
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   LogOut,
@@ -57,6 +57,7 @@ import {
   type PushDiagnostics,
 } from "@/lib/alerts/fcm-client";
 import { dispatchTestPushWorkflow } from "@/lib/alerts/test-push";
+import { alertSettingsReflectsUpdate } from "@/lib/alerts/alert-settings-data.mjs";
 import { Badge, Button, Card, CardSection, ConfirmDialog, Toggle, cx } from "@/components/alerts/ui";
 import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
@@ -347,6 +348,14 @@ function SectionCard({
 const FIELD_CLASS =
   "h-10 w-full rounded-xl border border-border bg-background px-3 text-sm text-foreground outline-none focus:border-accent";
 
+type PendingSettingsSave = {
+  field: string;
+  partial: Partial<AlertSettings>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+};
+
 export default function GoralertSettingsPage() {
   const toast = useToast();
   const { user, loading: authLoading, logout } = useFirebaseAuth();
@@ -379,6 +388,22 @@ export default function GoralertSettingsPage() {
   const [defaultAlertTime, setDefaultAlertTime] = useState("");
   const [defaultMessageTitle, setDefaultMessageTitle] = useState("");
   const [defaultMessageBody, setDefaultMessageBody] = useState("");
+  const mountedRef = useRef(true);
+  const saveInFlightRef = useRef(false);
+  const pendingSaveRef = useRef<PendingSettingsSave | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const pending = pendingSaveRef.current;
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pendingSaveRef.current = null;
+        pending.reject(new Error("설정 화면이 닫혀 저장 확인을 중단했습니다."));
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!user) return;
@@ -387,7 +412,7 @@ export default function GoralertSettingsPage() {
     setSettingsLoadError(null);
     const unsubscribe = watchAlertSettings(
       user.uid,
-      (loaded) => {
+      (loaded, metadata) => {
         if (!active) return;
         setSettings(loaded);
         setTelegramChatId(loaded.telegramChatId ?? "");
@@ -396,9 +421,25 @@ export default function GoralertSettingsPage() {
         setDefaultMessageBody(loaded.defaultMessageBody ?? "");
         setSettingsLoadError(null);
         setLoading(false);
+        const pending = pendingSaveRef.current;
+        if (
+          pending
+          && !metadata.hasPendingWrites
+          && alertSettingsReflectsUpdate(loaded, pending.partial)
+        ) {
+          clearTimeout(pending.timeout);
+          pendingSaveRef.current = null;
+          pending.resolve();
+        }
       },
-      () => {
+      (error) => {
         if (!active) return;
+        const pending = pendingSaveRef.current;
+        if (pending) {
+          clearTimeout(pending.timeout);
+          pendingSaveRef.current = null;
+          pending.reject(error);
+        }
         setSettingsLoadError("저장된 설정을 확인할 수 없습니다. 새로고침 후 다시 시도해 주세요.");
         setLoading(false);
         toast.error("설정 불러오기에 실패했습니다.");
@@ -422,6 +463,12 @@ export default function GoralertSettingsPage() {
     return () => {
       active = false;
       unsubscribe();
+      const pending = pendingSaveRef.current;
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pendingSaveRef.current = null;
+        pending.reject(new Error("설정 listener가 변경되어 저장 확인을 중단했습니다."));
+      }
     };
   }, [toast, user]);
 
@@ -446,17 +493,31 @@ export default function GoralertSettingsPage() {
   }, []);
 
   const persist = async (field: string, partial: Partial<AlertSettings>) => {
-    if (!user) return;
+    if (!user || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
     setSavingField(field);
+    const reflected = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("저장 내용의 실시간 반영을 확인하지 못했습니다. 새로고침 후 확인해 주세요.")),
+        10_000,
+      );
+      pendingSaveRef.current = { field, partial, resolve, reject, timeout };
+    });
     try {
-      await saveAlertSettings(user.uid, partial);
-      // The Firestore listener is authoritative. Do not present an optimistic
-      // value that could hide a rejected write or a newer change from another tab.
-      toast.success("저장했어요");
+      await Promise.all([saveAlertSettings(user.uid, partial), reflected]);
+      if (mountedRef.current) toast.success("저장했어요");
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "저장에 실패했습니다");
+      if (mountedRef.current) {
+        toast.error(err instanceof Error ? err.message : "저장에 실패했습니다");
+      }
     } finally {
-      setSavingField(null);
+      const pending = pendingSaveRef.current;
+      if (pending?.field === field) {
+        clearTimeout(pending.timeout);
+        pendingSaveRef.current = null;
+      }
+      saveInFlightRef.current = false;
+      if (mountedRef.current) setSavingField(null);
     }
   };
 

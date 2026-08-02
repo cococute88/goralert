@@ -181,8 +181,11 @@ class AlertEngine:
             try:
                 settings = self.firestore.load_alert_settings(rule.uid)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("settings load failed for uid=%s (%s); defaulting", rule.uid, exc)
-                settings = AlertSettings()
+                logger.warning(
+                    "settings load failed for rule=%s (%s); skipping",
+                    rule.id, type(exc).__name__,
+                )
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, "settings_unavailable")
         if not settings.globalEnabled:
             return ProcessResult(rule.id, rule.uid, STATUS_DISABLED, "globalEnabled=false")
 
@@ -971,8 +974,11 @@ class AlertEngine:
         if settings is None:
             try:
                 settings = self.firestore.load_alert_settings(uid)
-            except Exception:  # noqa: BLE001
-                settings = AlertSettings()
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("settings_unavailable") from exc
+
+        if not settings.globalEnabled:
+            return None
 
         if not dry_run and not self._test_has_credentials(channels, settings):
             logger.info(

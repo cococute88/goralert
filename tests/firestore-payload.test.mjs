@@ -4,6 +4,7 @@ import test from "node:test";
 import { serverTimestamp, Timestamp } from "firebase/firestore";
 import { sanitizeFirestorePayload } from "../lib/alerts/firestore-payload.mjs";
 import {
+  alertSettingsReflectsUpdate,
   defaultAlertSettingsData,
   normalizeAlertSettingsData,
 } from "../lib/alerts/alert-settings-data.mjs";
@@ -63,6 +64,16 @@ test("alert settings preserve persisted false and default missing boolean values
   assert.equal(normalizeAlertSettingsData({ globalEnabled: false }).globalEnabled, false);
   assert.equal(normalizeAlertSettingsData({ globalEnabled: true }).globalEnabled, true);
   assert.equal(normalizeAlertSettingsData({ pushTokens: [] }).globalEnabled, true);
+});
+
+test("settings save confirmation requires the authoritative reflected value", () => {
+  assert.equal(alertSettingsReflectsUpdate({ globalEnabled: false }, { globalEnabled: false }), true);
+  assert.equal(alertSettingsReflectsUpdate({ globalEnabled: true }, { globalEnabled: false }), false);
+  assert.equal(alertSettingsReflectsUpdate({}, { defaultMessageTitle: undefined }), true);
+  assert.equal(
+    alertSettingsReflectsUpdate({ defaultMessageTitle: "old" }, { defaultMessageTitle: undefined }),
+    false,
+  );
 });
 
 test("Firestore index manifest contains only deployable query indexes", () => {
