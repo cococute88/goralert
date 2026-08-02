@@ -21,6 +21,13 @@ class EvalResult:
     triggered: bool
     value: Optional[Union[float, str]] = None
     detail: Optional[str] = None
+    status: Optional[str] = None
+    failure_code: Optional[str] = None
+    observed_at: Optional[datetime] = None
+
+    def __post_init__(self) -> None:
+        if self.status is None:
+            self.status = "triggered" if self.triggered else "condition_false"
 
 
 @dataclass

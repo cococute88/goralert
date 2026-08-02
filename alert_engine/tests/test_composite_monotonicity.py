@@ -15,7 +15,8 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from alert_engine.evaluators import build_default_registry
-from alert_engine.evaluators.base import EvalContext
+from alert_engine.evaluators.base import EvalContext, EvalResult
+from alert_engine.evaluators.composite import CompositeEvaluator
 from alert_engine.models import AlertRule, Condition
 
 from .conftest import FakeDataSource
@@ -76,3 +77,59 @@ def test_empty_composite_is_not_triggered():
     cond = Condition(kind="composite", operator="or", conditions=[])
     ctx = EvalContext(uid="u1", now=datetime(2024, 5, 1, tzinfo=timezone.utc))
     assert _REGISTRY["composite"].evaluate(_RULE, cond, ctx).triggered is False
+
+
+class _StaticEvaluator:
+    def __init__(self, result):
+        self.result = result
+
+    def evaluate(self, rule, condition, ctx):
+        return self.result
+
+
+def test_composite_preserves_unknown_data_unless_boolean_result_is_already_decidable():
+    context = EvalContext(uid="u1", now=datetime(2024, 5, 1, tzinfo=timezone.utc))
+    registry = {
+        "price": _StaticEvaluator(EvalResult(
+            False,
+            None,
+            "price unavailable",
+            status="no_data",
+            failure_code="symbol_no_data",
+        )),
+        "custom": _StaticEvaluator(EvalResult(False, 0.0, "false")),
+        "date": _StaticEvaluator(EvalResult(True, 1.0, "true")),
+    }
+    evaluator = CompositeEvaluator(registry)
+
+    unknown_or_false = evaluator.evaluate(
+        _RULE,
+        Condition(
+            kind="composite",
+            operator="or",
+            conditions=[Condition(kind="price"), Condition(kind="custom")],
+        ),
+        context,
+    )
+    unknown_or_true = evaluator.evaluate(
+        _RULE,
+        Condition(
+            kind="composite",
+            operator="or",
+            conditions=[Condition(kind="price"), Condition(kind="date")],
+        ),
+        context,
+    )
+    unknown_and_false = evaluator.evaluate(
+        _RULE,
+        Condition(
+            kind="composite",
+            operator="and",
+            conditions=[Condition(kind="price"), Condition(kind="custom")],
+        ),
+        context,
+    )
+
+    assert unknown_or_false.status == "no_data"
+    assert unknown_or_true.triggered is True
+    assert unknown_and_false.status == "condition_false"

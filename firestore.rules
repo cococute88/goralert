@@ -31,6 +31,123 @@ service cloud.firestore {
         && (!('updatedAt' in data) || data.updatedAt is timestamp);
     }
 
+    function schedulerFields() {
+      return [
+        'nextScheduledAt',
+        'lastProcessedScheduledAt',
+        'lastOccurrenceId',
+        'scheduleStatus',
+        'scheduleChangedAt',
+        'lastTriggeredAt',
+        'lastValue',
+        'engineVersion',
+        'durableSchedulerVersion',
+        'schedulerMigration',
+        'schedulerRecovery',
+        'schedulerError'
+      ];
+    }
+
+    function hasRecurrence(data) {
+      return data.trigger is map
+        && 'recurrence' in data.trigger
+        && data.trigger.recurrence is map;
+    }
+
+    function validClientDurableCursor(data) {
+      return data.durableSchedulerVersion == 1
+        && data.nextScheduledAt is timestamp
+        && data.nextScheduledAt > request.time;
+    }
+
+    function validNewAlertRule(userId) {
+      return request.resource.data.uid == userId
+        && (
+          (
+            hasRecurrence(request.resource.data)
+            && validClientDurableCursor(request.resource.data)
+            && !request.resource.data.keys().hasAny([
+              'lastProcessedScheduledAt',
+              'lastOccurrenceId',
+              'scheduleStatus',
+              'scheduleChangedAt',
+              'lastTriggeredAt',
+              'lastValue',
+              'engineVersion',
+              'schedulerMigration',
+              'schedulerRecovery',
+              'schedulerError'
+            ])
+          )
+          || (
+            !hasRecurrence(request.resource.data)
+            && !request.resource.data.keys().hasAny(schedulerFields())
+          )
+        );
+    }
+
+    function validAlertRuleOwner(userId) {
+      return request.resource.data.uid == userId
+        && (!('uid' in resource.data) || resource.data.uid == userId);
+    }
+
+    function validOrdinaryAlertRuleUpdate(userId) {
+      return validAlertRuleOwner(userId)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(schedulerFields());
+    }
+
+    function validScheduleEdit(userId) {
+      return validAlertRuleOwner(userId)
+        && (!('scheduleStatus' in resource.data) || resource.data.scheduleStatus != 'processing')
+        && (
+          request.resource.data.trigger != resource.data.trigger
+          || (
+            resource.data.trigger.mode == 'once'
+            && request.resource.data.condition != resource.data.condition
+          )
+        )
+        && request.resource.data.scheduleStatus == 'schedule_changed'
+        && request.resource.data.scheduleChangedAt == request.time
+        && (
+          (
+            hasRecurrence(request.resource.data)
+            && validClientDurableCursor(request.resource.data)
+          )
+          || (
+            !hasRecurrence(request.resource.data)
+            && !('nextScheduledAt' in request.resource.data)
+            && !('durableSchedulerVersion' in request.resource.data)
+          )
+        )
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'lastProcessedScheduledAt',
+          'lastOccurrenceId',
+          'lastTriggeredAt',
+          'lastValue',
+          'engineVersion',
+          'schedulerMigration',
+          'schedulerRecovery',
+          'schedulerError'
+        ]);
+    }
+
+    function validClientTestLog(logId) {
+      return request.resource.data.isTest == true
+        && request.resource.data.id == logId
+        && request.resource.data.eventId == logId;
+    }
+
+    function validScheduleCancellation(userId, logId) {
+      return request.resource.data.isTest == false
+        && request.resource.data.id == logId
+        && request.resource.data.eventId == logId
+        && request.resource.data.ruleId is string
+        && request.resource.data.status == 'cancelled'
+        && request.resource.data.failureCode == 'schedule_changed'
+        && getAfter(/databases/$(database)/documents/users/$(userId)/alertRules/$(request.resource.data.ruleId)).data.scheduleStatus == 'schedule_changed'
+        && getAfter(/databases/$(database)/documents/users/$(userId)/alertRules/$(request.resource.data.ruleId)).data.scheduleChangedAt == request.time;
+    }
+
     match /users/{userId} {
       allow read, write: if isOwner(userId);
 
@@ -39,11 +156,35 @@ service cloud.firestore {
         allow create, update: if isOwner(userId) && validAlertSettings(request.resource.data);
       }
 
+      match /alertRules/{ruleId} {
+        allow read, delete: if isOwner(userId);
+        allow create: if isOwner(userId) && validNewAlertRule(userId);
+        allow update: if isOwner(userId) && (
+          validOrdinaryAlertRuleUpdate(userId) || validScheduleEdit(userId)
+        );
+      }
+
+      // Production occurrences and scheduler state are Admin SDK-owned. The
+      // browser may only create/update its own explicit test log or create the
+      // schedule-cancellation record in the same transaction as a schedule edit.
+      match /notificationLogs/{logId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && (
+          validClientTestLog(logId) || validScheduleCancellation(userId, logId)
+        );
+        allow update: if isOwner(userId)
+          && resource.data.isTest == true
+          && validClientTestLog(logId);
+        allow delete: if false;
+      }
+
       // Keep the existing owner-only policy for all other user subcollections.
       // Excluding alertSettings here ensures the validation above cannot be
       // bypassed through an overlapping recursive allow rule.
       match /{collectionId}/{document=**} {
-        allow read, write: if collectionId != 'alertSettings' && isOwner(userId);
+        allow read, write: if ![
+          'alertSettings', 'alertRules', 'notificationLogs'
+        ].hasAny([collectionId]) && isOwner(userId);
       }
     }
   }

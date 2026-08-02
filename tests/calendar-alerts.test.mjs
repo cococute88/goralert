@@ -221,10 +221,22 @@ test("legacy event-type token in titleContains is compatible but ordinary title 
     match: { type: "ex_div", titleContains: "buy-deadline" },
     markFilter: ["star", "heart"],
   });
+  const minusOneCompatible = rule("minus-one-compatible", {
+    source: "calendarEvents",
+    match: { type: "buy_by_minus_1", titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
+  const titleOnly = rule("title-only", {
+    source: "calendarEvents",
+    match: { titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
 
   assert.equal(alerts.alertRuleTargetsCalendarEvent(compatible, heartedBuy), true);
   assert.equal(alerts.alertRuleTargetsCalendarEvent(realTitleFilter, heartedBuy), false);
   assert.equal(alerts.alertRuleTargetsCalendarEvent(conflictingLegacyToken, heartedBuy), false);
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(minusOneCompatible, heartedBuy), true);
+  assert.equal(alerts.alertRuleTargetsCalendarEvent(titleOnly, heartedBuy), false);
 });
 
 test("saving a legacy generic rule removes the stale title token and keeps its canonical type", () => {
@@ -237,6 +249,23 @@ test("saving a legacy generic rule removes the stale title token and keeps its c
 
   assert.deepEqual(saved.condition.selector.match, { type: ["buy_by"] });
   assert.deepEqual(saved.condition.selector.markFilter, ["star", "heart"]);
+});
+
+test("saving a legacy minus-one rule removes only its compatible stale title token", () => {
+  const legacyMinusOne = rule("legacy-minus-one", {
+    source: "calendarEvents",
+    match: { type: ["buy_by_minus_1"], titleContains: "buy-deadline" },
+    markFilter: ["star", "heart"],
+  });
+  const savedLegacy = buildRule("user-1", legacyMinusOne);
+  assert.deepEqual(savedLegacy.condition.selector.match, { type: ["buy_by_minus_1"] });
+
+  const genuineTitleSearch = rule("genuine-title-search", {
+    source: "calendarEvents",
+    match: { titleContains: "buy-deadline" },
+  });
+  const savedSearch = buildRule("user-1", genuineTitleSearch);
+  assert.deepEqual(savedSearch.condition.selector.match, { titleContains: "buy-deadline" });
 });
 
 test("single-event form removes broad filters while the standard form keeps them", () => {

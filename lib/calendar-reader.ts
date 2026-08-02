@@ -1,9 +1,11 @@
 import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { firestoreDb } from "@/lib/firebase/client";
 import {
+  calendarPortfolioIdsForRule,
   normalizeAuthoritativeCalendarEvent,
   resolveGeneratedCalendarEvents,
 } from "@/lib/calendar-contract";
+import type { AlertRule } from "@/lib/alerts/types";
 import {
   DEFAULT_CALENDAR_PORTFOLIO_ID,
   filterCalendarDisplayEvents,
@@ -120,6 +122,34 @@ async function loadResolvedCalendarEventsForPortfolio(
 export async function loadResolvedCalendarEvents(uid: string): Promise<ResolvedCalendarEvent[]> {
   const portfolioId = await activePortfolioId(uid);
   return (await loadResolvedCalendarEventsForPortfolio(uid, portfolioId)).events;
+}
+
+export async function loadAlertRuleCalendarEvents(
+  uid: string,
+  rules: readonly AlertRule[],
+): Promise<Record<string, ResolvedCalendarEvent[]>> {
+  const activeId = await activePortfolioId(uid);
+  const portfolioIdsByRule = new Map(
+    rules.map((rule) => [rule.id, calendarPortfolioIdsForRule(rule, activeId)]),
+  );
+  const portfolioIds = Array.from(new Set(Array.from(portfolioIdsByRule.values()).flat()));
+  const entries = await Promise.all(
+    portfolioIds.map(async (portfolioId) => [
+      portfolioId,
+      (await loadResolvedCalendarEventsForPortfolio(uid, portfolioId)).events,
+    ] as const),
+  );
+  const eventsByPortfolio = new Map(entries);
+  return Object.fromEntries(rules.map((rule) => [
+    rule.id,
+    (portfolioIdsByRule.get(rule.id) ?? []).flatMap(
+      (portfolioId) => (eventsByPortfolio.get(portfolioId) ?? []).map((event) => ({
+        ...event,
+        portfolioId,
+        activePortfolio: portfolioId === activeId,
+      })),
+    ),
+  ]));
 }
 
 function stringArrayValues(value: unknown): string[] {

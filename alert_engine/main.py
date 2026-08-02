@@ -32,7 +32,16 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .config import load_config
-from .engine import AlertEngine, STATUS_DELIVERED, STATUS_ERROR
+from .engine import (
+    AlertEngine,
+    STATUS_DELIVERED,
+    STATUS_DELIVERY_FAILED,
+    STATUS_DELIVERY_UNKNOWN,
+    STATUS_ERROR,
+    STATUS_EVALUATION_ERROR,
+    STATUS_PARTIAL_FAILURE,
+    STATUS_PROVIDER_ERROR,
+)
 from .models import AlertRule, AlertSettings
 
 logger = logging.getLogger("alert_engine.main")
@@ -146,15 +155,28 @@ def run(argv: Optional[List[str]] = None) -> int:
 
         for rule in uid_rules:
             try:
-                result = engine.process_rule(rule, now=started, settings=settings, dry_run=args.dry_run)
+                # Use the actual per-rule worker time. Reusing the job start for
+                # every rule can create an already-expired occurrence lease in
+                # a long run and can also delay due decisions for later rules.
+                result = engine.process_rule(
+                    rule, now=datetime.now(timezone.utc), settings=settings,
+                    dry_run=args.dry_run,
+                )
                 status_counts[result.status] += 1
                 if result.status == STATUS_DELIVERED:
                     delivered += 1
-                if result.status == STATUS_ERROR:
+                if result.status in {
+                    STATUS_ERROR,
+                    STATUS_EVALUATION_ERROR,
+                    STATUS_PROVIDER_ERROR,
+                    STATUS_PARTIAL_FAILURE,
+                    STATUS_DELIVERY_FAILED,
+                    STATUS_DELIVERY_UNKNOWN,
+                }:
                     errors += 1
                 logger.info(
-                    "rule=%s uid=%s -> %s%s",
-                    rule.id, uid, result.status,
+                    "alertId=%s ruleId=%s uid=%s occurrenceId=%s -> %s%s",
+                    rule.id, rule.id, uid, result.event_id or "<none>", result.status,
                     f" ({result.detail})" if result.detail else "",
                 )
             except Exception as exc:  # noqa: BLE001 - isolation: never abort the run
@@ -167,8 +189,10 @@ def run(argv: Optional[List[str]] = None) -> int:
         "engine done :: processed=%d delivered=%d errors=%d elapsed=%.2fs breakdown=%s",
         len(rules), delivered, errors, elapsed, dict(status_counts),
     )
-    # Non-zero exit only on hard infra errors, not on individual rule failures.
-    return 0
+    # A durable per-occurrence failure record is written whenever possible, but
+    # the runner must still fail visibly so operations can investigate DB,
+    # timezone, evaluation, or worker exceptions.
+    return 1 if errors else 0
 
 
 if __name__ == "__main__":

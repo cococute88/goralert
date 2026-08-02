@@ -10,7 +10,7 @@ import { Copy, Loader2, Pencil, Plus, Send, Star, Trash2 } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule } from "@/lib/alerts/types";
 import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
-import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
+import { loadAlertRuleCalendarEvents } from "@/lib/calendar-reader";
 import {
   deleteAlertRule,
   enqueueTestPushRequest,
@@ -26,6 +26,20 @@ import { useToast } from "@/components/alerts/ui/toast";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import AlertKindBadge from "@/components/alerts/forms/AlertKindBadge";
 import { stashDraft } from "@/components/alerts/draftStore";
+
+const SCHEDULE_STATUS_LABEL: Record<string, string> = {
+  condition_false: "조건 미충족",
+  no_data: "데이터 없음",
+  stale_data: "데이터 지연",
+  provider_error: "공급자 오류",
+  evaluation_error: "계산 오류",
+  skipped_quiet_hours: "방해 금지 시간",
+  skipped_cooldown: "쿨다운",
+  sent: "발송 성공",
+  partial_failure: "부분 성공",
+  failed: "발송 실패",
+  delivery_unknown: "발송 결과 불명",
+};
 
 function RuleCard({
   rule,
@@ -47,6 +61,7 @@ function RuleCard({
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const next = nextRuleOccurrence(rule, calendarEvents);
+  const overdue = Boolean(next && next.getTime() < Date.now());
 
   const handleToggle = async (value: boolean) => {
     setEnabled(value);
@@ -126,22 +141,35 @@ function RuleCard({
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
               다음 예정: {next
-                ? formatNextOccurrence(next)
+                ? `${overdue ? "처리 지연 · " : ""}${formatNextOccurrence(next, rule.trigger.recurrence?.tz)}`
                 : rule.trigger.recurrence?.kind === "calendar"
                   ? "해당 조건의 예정 일정 없음"
                   : "조건 충족 시"}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              마지막 발송: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleString("ko-KR") : "없음"}
+              마지막 발송: {rule.lastTriggeredAt ? new Date(rule.lastTriggeredAt).toLocaleString("ko-KR", {
+                timeZone: rule.trigger.recurrence?.tz || "Asia/Seoul",
+              }) : "없음"}
             </p>
+            {rule.scheduleStatus && SCHEDULE_STATUS_LABEL[rule.scheduleStatus] ? (
+              <p className="text-[11px] text-muted-foreground">
+                최근 평가: {SCHEDULE_STATUS_LABEL[rule.scheduleStatus]}
+              </p>
+            ) : null}
           </div>
           <Toggle checked={enabled} onChange={handleToggle} label={`${rule.name} 사용`} />
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" variant="secondary" onClick={handleTest} disabled={testing}>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleTest}
+            disabled={testing}
+            title="저장된 조건과 데이터는 평가하지 않고 Telegram/Push 채널과 메시지 발송만 테스트합니다."
+          >
             {testing ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
-            테스트
+            채널 테스트
           </Button>
           <Link href={`/alerts/${rule.id}`}>
             <Button size="sm" variant="secondary">
@@ -181,7 +209,7 @@ function RuleCard({
 export default function AlertsListPage() {
   const { user, loading: authLoading } = useFirebaseAuth();
   const [rules, setRules] = useState<AlertRule[]>([]);
-  const [calendarEvents, setCalendarEvents] = useState<ResolvedCalendarEvent[]>([]);
+  const [calendarEventsByRule, setCalendarEventsByRule] = useState<Record<string, ResolvedCalendarEvent[]>>({});
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
 
@@ -191,20 +219,24 @@ export default function AlertsListPage() {
     if (!user) return;
     let active = true;
     setLoading(true);
-    Promise.allSettled([loadAlertRules(user.uid), loadResolvedCalendarEvents(user.uid)])
-      .then(([rulesResult, calendarResult]) => {
+    loadAlertRules(user.uid)
+      .then(async (loadedRules) => {
+        let calendarEvents: Record<string, ResolvedCalendarEvent[]> = {};
+        try {
+          calendarEvents = await loadAlertRuleCalendarEvents(user.uid, loadedRules);
+        } catch (reason) {
+          console.error("[calendar-contract] next-occurrence read failed", reason);
+        }
         if (active) {
-          setRules(rulesResult.status === "fulfilled" ? rulesResult.value : []);
-          setCalendarEvents(calendarResult.status === "fulfilled" ? calendarResult.value : []);
-          if (calendarResult.status === "rejected") {
-            console.error("[calendar-contract] next-occurrence read failed", calendarResult.reason);
-          }
+          setRules(loadedRules);
+          setCalendarEventsByRule(calendarEvents);
         }
       })
-      .catch(() => {
+      .catch((reason) => {
+        console.error("[alerts] rule read failed", reason);
         if (active) {
           setRules([]);
-          setCalendarEvents([]);
+          setCalendarEventsByRule({});
         }
       })
       .finally(() => {
@@ -252,7 +284,7 @@ export default function AlertsListPage() {
               key={rule.id}
               rule={rule}
               uid={user.uid}
-              calendarEvents={calendarEvents}
+              calendarEvents={calendarEventsByRule[rule.id] ?? []}
               onChanged={refresh}
             />
           ))}

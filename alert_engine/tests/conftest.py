@@ -13,6 +13,7 @@ makes the whole suite fast.
 from __future__ import annotations
 
 import os
+import threading
 
 # --- must run before any alert_engine import (config reads these at import) ---
 os.environ.setdefault("ALERT_DELIVERY_MAX_RETRIES", "0")
@@ -21,8 +22,9 @@ os.environ.setdefault("ALERT_DELIVERY_BACKOFF_MAX", "0")
 os.environ.setdefault("ALERT_EVAL_WINDOW_MINUTES", "15")
 os.environ.setdefault("DEFAULT_TZ", "Asia/Seoul")
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from types import SimpleNamespace
 
 import pytest
 
@@ -150,10 +152,16 @@ class FakeFirestore:
         self.state_updates: List[Dict[str, Any]] = []
         self.removed_push_tokens: List[str] = []
         self.calendar_writes = 0
+        self.rule_exists = True
+        self.rule_enabled = True
+        self.legacy_cursor = None
+        self.legacy_initializations = 0
+        self.scheduler_errors: List[Dict[str, Any]] = []
         self._settings = settings or AlertSettings(
             globalEnabled=True, telegramChatId="chat-123", pushTokens=["tok-1"]
         )
         self._calendar_store = calendar_store or FakeCalendarStore()
+        self._lock = threading.Lock()
 
     # settings / idempotency / writes -----------------------------------------
     def load_alert_settings(self, uid: str) -> AlertSettings:
@@ -184,6 +192,159 @@ class FakeFirestore:
 
     def write_notification_log(self, uid: str, log) -> None:
         self.logs[log.id] = log
+
+    def get_occurrence(self, uid, event_id):
+        value = self.logs.get(event_id)
+        if value is None:
+            return None
+        return value if isinstance(value, dict) else vars(value)
+
+    def initialize_legacy_scheduler_cursor(
+        self, uid, rule_id, expected_trigger, expected_schedule_changed_at,
+        next_scheduled_at, migration_cutoff,
+    ):
+        with self._lock:
+            if not self.rule_exists or not self.rule_enabled:
+                return {
+                    "initialization": "inactive",
+                    "reason": "rule_deleted" if not self.rule_exists else "rule_disabled",
+                }
+            if self.legacy_cursor is not None:
+                return {
+                    "initialization": "already_initialized",
+                    "nextScheduledAt": self.legacy_cursor,
+                }
+            self.legacy_cursor = next_scheduled_at
+            self.legacy_initializations += 1
+            self.state_updates.append({
+                "rule_id": rule_id,
+                "next_scheduled_at": next_scheduled_at,
+                "durable_scheduler_version": 1,
+                "scheduler_migration": {
+                    "kind": "legacy_cursor_bootstrap",
+                    "backlogPolicy": "skip_automatic_backlog",
+                    "backlogSkippedThrough": migration_cutoff,
+                    "initializedNextScheduledAt": next_scheduled_at,
+                },
+                "schedule_status": "legacy_cursor_initialized",
+            })
+            return {
+                "initialization": "initialized",
+                "nextScheduledAt": next_scheduled_at,
+            }
+
+    def record_scheduler_error(self, uid, rule_id, code, detail, detected_at):
+        self.scheduler_errors.append({
+            "rule_id": rule_id,
+            "code": code,
+            "detail": detail,
+            "detected_at": detected_at,
+        })
+        return self.rule_exists
+
+    def claim_occurrence(
+        self, uid, rule_id, event_id, payload, next_scheduled_at, worker_id, now,
+        lease_seconds=600, expected_next_scheduled_at=None,
+        expected_schedule_changed_at=None,
+    ):
+        with self._lock:
+            existing = self.logs.get(event_id)
+            if existing is not None:
+                data = existing if isinstance(existing, dict) else vars(existing)
+                if data.get("status") in {
+                    "sent", "partial_failure", "failed", "skipped", "cancelled",
+                    "disabled", "delivery_unknown", "condition_false", "no_data",
+                    "stale_data", "provider_error", "evaluation_error",
+                    "skipped_quiet_hours", "skipped_cooldown",
+                }:
+                    return {"claim": "terminal", "record": data}
+                owner = data.get("leaseOwner")
+                if owner and owner != worker_id and data.get("leaseExpiresAt", now) > now:
+                    return {"claim": "in_progress", "record": data}
+                data["leaseOwner"] = worker_id
+                data["attemptCount"] = int(data.get("attemptCount") or 0) + 1
+                if not data.get("scheduledFor"):
+                    data.update({
+                        key: value for key, value in payload.items()
+                        if key not in {"channels", "status", "attemptCount"}
+                    })
+                self.state_updates.append({
+                    "rule_id": rule_id,
+                    "next_scheduled_at": next_scheduled_at,
+                    "last_occurrence_id": event_id,
+                    "schedule_status": "processing",
+                })
+                return {"claim": "claimed", "record": data}
+            record = {
+                **payload,
+                "leaseOwner": worker_id,
+                "leaseExpiresAt": now + timedelta(seconds=lease_seconds),
+                "attemptCount": 1,
+            }
+            self.logs[event_id] = record
+            self.state_updates.append({
+                "rule_id": rule_id,
+                "next_scheduled_at": next_scheduled_at,
+                "last_occurrence_id": event_id,
+                "schedule_status": "processing",
+            })
+            return {"claim": "claimed", "record": record}
+
+    def begin_channel_attempt(self, uid, rule_id, event_id, channel, worker_id, attempted_at):
+        with self._lock:
+            record = self.logs[event_id]
+            if record.get("leaseOwner") != worker_id:
+                return "lease_lost"
+            if not self.rule_exists or not self.rule_enabled:
+                reason = "rule_deleted" if not self.rule_exists else "rule_disabled"
+                for result in record.get("channels", []):
+                    if result.get("status") == "pending":
+                        result.update({"status": "failed", "errorCode": reason})
+                statuses = {result.get("status") for result in record.get("channels", [])}
+                record["status"] = "partial_failure" if "sent" in statuses else (
+                    "cancelled" if reason == "rule_deleted" else "disabled"
+                )
+                record["pending"] = False
+                record.pop("leaseOwner", None)
+                record.pop("leaseExpiresAt", None)
+                return reason
+            for result in record.get("channels", []):
+                if result.get("channel") == channel and result.get("status") == "pending":
+                    result.update({
+                        "status": "sending",
+                        "attemptCount": int(result.get("attemptCount") or 0) + 1,
+                        "attemptedAt": attempted_at.isoformat(),
+                    })
+                    return "began"
+            return "not_pending"
+
+    def record_channel_result(self, uid, event_id, result, worker_id):
+        with self._lock:
+            record = self.logs[event_id]
+            if record.get("leaseOwner") != worker_id:
+                raise RuntimeError("lease lost")
+            for index, current in enumerate(record.get("channels", [])):
+                if current.get("channel") == result.get("channel"):
+                    record["channels"][index] = {**current, **result}
+                    return
+            record.setdefault("channels", []).append(dict(result))
+
+    def finalize_occurrence(self, uid, rule_id, event_id, status, updates, rule_updates=None, worker_id=None):
+        with self._lock:
+            record = self.logs[event_id]
+            if worker_id is not None and record.get("leaseOwner") != worker_id:
+                raise RuntimeError("lease lost")
+            record.update({key: value for key, value in updates.items() if value is not None})
+            record["status"] = status
+            record["pending"] = False
+            record.pop("leaseOwner", None)
+            record.pop("leaseExpiresAt", None)
+            # Existing tests use attribute access for permanent logs.
+            materialized = dict(record)
+            materialized["message"] = SimpleNamespace(**materialized["message"])
+            materialized["channels"] = [SimpleNamespace(**item) for item in materialized.get("channels", [])]
+            self.logs[event_id] = SimpleNamespace(**materialized)
+            self.state_updates.append({"rule_id": rule_id, "schedule_status": status, **(rule_updates or {})})
 
     def update_rule_state(
         self,
@@ -283,6 +444,8 @@ def make_calendar_date_rule(rule_id: str = "rule-cal", mark_filter: Optional[Lis
         },
         "trigger": {"mode": "recurring", "recurrence": {"kind": "calendar"}},
         "delivery": {"channels": ["telegram"], "message": {"title": "cal", "body": "{ticker}"}},
+        "durableSchedulerVersion": 1,
+        "nextScheduledAt": datetime(2024, 5, 1, 0, 0, tzinfo=timezone.utc),
     })
 
 

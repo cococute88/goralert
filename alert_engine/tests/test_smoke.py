@@ -19,6 +19,7 @@ from alert_engine.engine import (
     STATUS_DELIVERED,
     STATUS_DUPLICATE,
     STATUS_NOT_TRIGGERED,
+    STATUS_PARTIAL_FAILURE,
     _within_quiet_hours,
 )
 from alert_engine.models import AlertRule, AlertSettings, MessageTemplate, QuietHours
@@ -193,7 +194,7 @@ def test_delivery_isolation_partial_failure_one_log():
                          channel_registry=channels, firestore=fs)
     rule = _ratio_rule()
     r = engine.process_rule(rule, now=datetime(2024, 5, 2, 12, 0, tzinfo=timezone.utc))
-    assert r.status == STATUS_DELIVERED
+    assert r.status == STATUS_PARTIAL_FAILURE
     assert len(fs.logs) == 1  # one log despite a failed channel
     statuses = {c.channel: c.status for c in next(iter(fs.logs.values())).channels}
     assert statuses == {"telegram": "sent", "push": "failed"}

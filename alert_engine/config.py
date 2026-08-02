@@ -28,7 +28,7 @@ from typing import Optional
 
 # Bumped whenever evaluation/delivery semantics change. Stamped onto rules and
 # notification logs so history + backtests are reproducible.
-ENGINE_VERSION = "2.1.0"
+ENGINE_VERSION = "3.0.0"
 
 # Default timezone for recurrence/quiet-hours interpretation (US requirement).
 DEFAULT_TZ = os.environ.get("DEFAULT_TZ", "Asia/Seoul")
@@ -38,12 +38,10 @@ DELIVERY_MAX_RETRIES = int(os.environ.get("ALERT_DELIVERY_MAX_RETRIES", "3"))
 DELIVERY_BACKOFF_BASE_SECONDS = float(os.environ.get("ALERT_DELIVERY_BACKOFF_BASE", "1.0"))
 DELIVERY_BACKOFF_MAX_SECONDS = float(os.environ.get("ALERT_DELIVERY_BACKOFF_MAX", "30.0"))
 
-# Evaluation window (minutes) used to bucket eventIds and decide "due now".
-# MUST be >= the cron cadence in .github/workflows/alert-engine.yml (currently
-# */30) so consecutive runs' due-windows TILE the timeline with no gap and a
-# delayed/skipped run is caught up by the next run. A smaller window than the
-# cadence can MISS scheduled alerts whose time falls in the gap. Scheduled rules
-# bucket by occurrence time, so a larger window never causes duplicate sends.
+# Evaluation window for unscheduled threshold eventId buckets. Scheduled rules
+# use a durable nextScheduledAt cursor and never expire because this window was
+# missed. The value is also a bounded inference fallback for malformed legacy
+# rows that lack nextScheduledAt, createdAt, and last-trigger fields.
 DEFAULT_EVAL_WINDOW_MINUTES = int(os.environ.get("ALERT_EVAL_WINDOW_MINUTES", "30"))
 
 

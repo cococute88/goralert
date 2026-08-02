@@ -6,13 +6,23 @@ from datetime import datetime, timezone
 
 import pytest
 
+from alert_engine.datasource import AlertDataSource
 from alert_engine.engine import STATUS_DELIVERED, STATUS_NOT_TRIGGERED
 from alert_engine.models import AlertRule
 
 from .conftest import FakeChannel, FakeDataSource, FakeFirestore, build_engine
 
 
-def _calendar_rule(event_types: list[str], rule_id: str = "buy-by-rule") -> AlertRule:
+def _calendar_rule(
+    event_types: list[str],
+    rule_id: str = "buy-by-rule",
+    *,
+    title_contains: str | None = None,
+    time: str = "09:00",
+) -> AlertRule:
+    match = {"type": event_types}
+    if title_contains is not None:
+        match["titleContains"] = title_contains
     return AlertRule.from_dict({
         "id": rule_id,
         "uid": "u1",
@@ -23,11 +33,11 @@ def _calendar_rule(event_types: list[str], rule_id: str = "buy-by-rule") -> Aler
             "kind": "date",
             "selector": {
                 "source": "calendarEvents",
-                "match": {"type": event_types},
+                "match": match,
                 "markFilter": ["star"],
             },
         },
-        "trigger": {"mode": "recurring", "recurrence": {"kind": "calendar", "tz": "Asia/Seoul", "time": "09:00"}},
+        "trigger": {"mode": "recurring", "recurrence": {"kind": "calendar", "tz": "Asia/Seoul", "time": time}},
         "delivery": {"channels": ["telegram"], "message": {"title": "매수 마감", "body": "{ticker}"}},
     })
 
@@ -43,7 +53,10 @@ def _process(event_date: str, event_types: list[str], now: datetime, rule_id: st
     }])
     firestore = FakeFirestore()
     engine = build_engine(datasource, firestore, {"telegram": FakeChannel("telegram")})
-    return engine.process_rule(_calendar_rule(event_types, rule_id), now=now), firestore
+    rule = _calendar_rule(event_types, rule_id)
+    rule.durableSchedulerVersion = 1
+    rule.nextScheduledAt = now.replace(minute=0, second=0, microsecond=0)
+    return engine.process_rule(rule, now=now), firestore
 
 
 @pytest.mark.parametrize(
@@ -94,8 +107,11 @@ def test_buy_by_and_buy_by_minus_one_are_independent_and_can_both_fire():
     firestore = FakeFirestore()
     engine = build_engine(datasource, firestore, {"telegram": FakeChannel("telegram")})
     rule = _calendar_rule(["buy_by", "buy_by_minus_1"], "both")
+    rule.durableSchedulerVersion = 1
+    rule.nextScheduledAt = sunday_now.replace(minute=0, second=0, microsecond=0)
 
     assert engine.process_rule(rule, now=sunday_now).status == STATUS_DELIVERED
+    rule.nextScheduledAt = monday_now.replace(minute=0, second=0, microsecond=0)
     assert engine.process_rule(rule, now=monday_now).status == STATUS_DELIVERED
     assert len(firestore.logs) == 2
     # The derived notification never creates or modifies a calendar event.
@@ -107,3 +123,43 @@ def test_buy_by_and_buy_by_minus_one_are_independent_and_can_both_fire():
         "type": "buy_by",
         "star": True,
     }]
+
+
+def test_sgov_legacy_title_token_fires_only_on_calendar_day_minus_one_at_1800():
+    source_event = {
+        "id": "dividend:SGOV:buy:2026-08-10",
+        "date": "2026-08-10",
+        "ticker": "SGOV",
+        "title": "SGOV 매수 마감",
+        "type": "buy_by",
+        "star": True,
+        "heart": True,
+    }
+    firestore = FakeFirestore()
+    firestore.read_calendar_events = lambda uid, portfolio_id=None: [source_event]
+    datasource = AlertDataSource(firestore=firestore)
+    telegram = FakeChannel("telegram")
+    engine = build_engine(datasource, firestore, {"telegram": telegram})
+    rule = _calendar_rule(
+        ["buy_by_minus_1"],
+        "sgov-sell",
+        title_contains="buy-deadline",
+        time="18:00",
+    )
+    sunday_due = datetime(2026, 8, 9, 9, 0, tzinfo=timezone.utc)
+    monday_due = datetime(2026, 8, 10, 9, 0, tzinfo=timezone.utc)
+    rule.nextScheduledAt = sunday_due
+    rule.durableSchedulerVersion = 1
+
+    first = engine.process_rule(rule, now=sunday_due)
+    rule.nextScheduledAt = monday_due
+    duplicate_date = engine.process_rule(rule, now=monday_due)
+
+    assert first.status == STATUS_DELIVERED
+    assert duplicate_date.status == STATUS_NOT_TRIGGERED
+    assert telegram.calls == 1
+    assert len(firestore.logs) == 2
+    assert any(
+        getattr(log, "status", None) == "condition_false"
+        for log in firestore.logs.values()
+    )

@@ -60,6 +60,42 @@ function conditionHasThreshold(condition: Condition): condition is Extract<Condi
   return "threshold" in condition && "comparator" in condition;
 }
 
+function validateConditionInputs(condition: Condition, errors: string[], path = "condition"): void {
+  const metric = "metric" in condition ? condition.metric : undefined;
+  const metricTicker = metric && "ticker" in metric ? metric.ticker : undefined;
+  if (condition.kind === "ratio") {
+    if (!isNonEmptyString(condition.numerator)) errors.push(`${path}.numerator is required`);
+    if (!isNonEmptyString(condition.denominator)) errors.push(`${path}.denominator is required`);
+  }
+  if (["rsi", "price"].includes(condition.kind)) {
+    if (!isNonEmptyString(metricTicker)) errors.push(`${path}.metric.ticker is required`);
+  }
+  if (condition.kind === "rsi" && (
+    metric?.metric !== "rsi" || !Number.isInteger(metric.period) || metric.period < 1
+  )) {
+    errors.push(`${path}.metric.period must be an integer >= 1`);
+  }
+  if (condition.kind === "fx" && !isNonEmptyString(metric?.metric === "fx" ? metric.pair : undefined)) {
+    errors.push(`${path}.metric.pair is required`);
+  }
+  if (condition.kind === "koreanEtf" && !isNonEmptyString(metric?.metric === "koreanEtf" ? metric.code : undefined)) {
+    errors.push(`${path}.metric.code is required`);
+  }
+  if (["rsi", "vix", "price", "fx", "gold", "bitcoin", "koreanEtf"].includes(condition.kind)) {
+    if (metric?.metric !== condition.kind) {
+      errors.push(`${path}.metric.metric must match ${condition.kind}`);
+    }
+  }
+  if (condition.kind === "custom" && !isNonEmptyString(condition.expression)) {
+    errors.push(`${path}.expression is required`);
+  }
+  if (condition.kind === "composite") {
+    if (!["and", "or"].includes(condition.operator)) errors.push(`${path}.operator must be and or or`);
+    if (condition.conditions.length === 0) errors.push(`${path}.conditions must not be empty`);
+    condition.conditions.forEach((child, index) => validateConditionInputs(child, errors, `${path}.conditions[${index}]`));
+  }
+}
+
 export function validateAlertRule(rule: AlertRule): ValidationResult {
   const errors: string[] = [];
 
@@ -78,6 +114,10 @@ export function validateAlertRule(rule: AlertRule): ValidationResult {
     if (rule.kind !== "composite" && rule.condition.kind !== rule.kind) {
       errors.push(`condition.kind (${rule.condition.kind}) must match rule.kind (${rule.kind}) for non-composite rules`);
     }
+    if (rule.kind === "composite" && rule.condition.kind !== "composite") {
+      errors.push("condition.kind must be composite when rule.kind is composite");
+    }
+    validateConditionInputs(rule.condition, errors);
 
     // Threshold-based kinds need a finite threshold and an allowed comparator.
     if (THRESHOLD_KINDS.includes(rule.kind)) {
@@ -148,17 +188,27 @@ export function validateNotificationLog(log: NotificationLog): ValidationResult 
     errors.push("message.title (non-empty) and message.body are required");
   }
 
-  if (!Array.isArray(log.channels) || log.channels.length < 1) {
-    errors.push("channels must contain at least one entry");
+  if (!Array.isArray(log.channels)) {
+    errors.push("channels must be an array");
   } else {
     for (const entry of log.channels) {
       if (!DELIVERY_CHANNELS.includes(entry.channel)) {
         errors.push(`channels contains invalid channel '${String(entry.channel)}'`);
       }
-      if (entry.status !== "sent" && entry.status !== "failed") {
-        errors.push("channel.status must be 'sent' or 'failed'");
+      if (!["pending", "sending", "sent", "failed", "unknown"].includes(entry.status)) {
+        errors.push("channel.status is invalid");
       }
     }
+  }
+
+  if (log.scheduledFor !== undefined && !isIsoTimestamp(log.scheduledFor)) {
+    errors.push("scheduledFor must be an ISO timestamp when present");
+  }
+  if (log.processingStartedAt !== undefined && !isIsoTimestamp(log.processingStartedAt)) {
+    errors.push("processingStartedAt must be an ISO timestamp when present");
+  }
+  if (log.completedAt !== undefined && !isIsoTimestamp(log.completedAt)) {
+    errors.push("completedAt must be an ISO timestamp when present");
   }
 
   if (typeof log.isTest !== "boolean") errors.push("isTest must be a boolean");

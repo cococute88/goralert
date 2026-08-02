@@ -38,4 +38,6 @@ export type ResolvedCalendarEvent = LegacyCalendarEvent & {
   source: "calendarEvents" | "calendarCustomEvents";
   star: boolean;
   heart: boolean;
+  portfolioId?: string;
+  activePortfolio?: boolean;
 };

@@ -52,7 +52,10 @@ class TelegramChannel:
         try:
             resp = requests.post(url, json=payload, timeout=_TIMEOUT_SECONDS)
         except Exception as exc:  # noqa: BLE001
-            return ChannelSendResult(self.name, "failed", error=f"network error: {exc}")
+            # A timeout/connection loss after POST begins cannot prove whether
+            # Telegram accepted the message. Preserve the ambiguity and never
+            # authorize an automatic retry that could duplicate it.
+            return ChannelSendResult(self.name, "unknown", error=f"network error: {exc}")
 
         if resp.status_code == 200:
             try:

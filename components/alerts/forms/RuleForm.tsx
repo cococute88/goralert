@@ -94,7 +94,10 @@ export default function RuleForm({
       // Keep the draft in place and avoid exposing Firestore paths or a UID in
       // user-facing UI. The browser console keeps a safe diagnostic breadcrumb.
       console.error("[alerts] rule save failed", { error: err instanceof Error ? err.name : "unknown" });
-      toast.error("알림 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+      const processingMessage = "처리 중인 알림은 현재 회차가 끝난 뒤 일정을 변경할 수 있습니다.";
+      toast.error(err instanceof Error && err.message === processingMessage
+        ? processingMessage
+        : "알림 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
     } finally {
       setSaving(false);
     }

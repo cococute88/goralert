@@ -58,7 +58,9 @@ function compatibleLegacySelectorTitleType(
   const legacyType = legacySelectorTitleEventType(match?.titleContains);
   if (!legacyType) return "";
   const explicitTypes = rawSelectorTypes(match);
-  return explicitTypes.includes(legacyType)
+  const selectsCompatibleSourceType = explicitTypes.includes(legacyType)
+    || (legacyType === "buy_by" && explicitTypes.includes("buy_by_minus_1"));
+  return selectsCompatibleSourceType
     ? legacyType
     : "";
 }
@@ -66,10 +68,7 @@ function compatibleLegacySelectorTitleType(
 export function calendarSelectorMatchTypes(
   match: DateEventSelector["match"] | undefined,
 ): string[] {
-  const types = new Set(rawSelectorTypes(match));
-  const legacyType = compatibleLegacySelectorTitleType(match);
-  if (legacyType) types.add(legacyType);
-  return Array.from(types);
+  return Array.from(new Set(rawSelectorTypes(match)));
 }
 
 export function calendarSelectorTitleContains(
@@ -257,6 +256,8 @@ function selectorNotificationDates(
 
   for (const event of events) {
     if (event.source !== selector.source) continue;
+    if (selector.portfolioId && event.portfolioId && event.portfolioId !== selector.portfolioId) continue;
+    if (!selector.portfolioId && event.activePortfolio === false) continue;
     if (identity && !calendarIdentityKeys(event as unknown as CalendarRecord).includes(identity)) continue;
     if (date && event.date !== date) continue;
     if (ticker && event.ticker.toUpperCase() !== ticker) continue;
@@ -322,4 +323,23 @@ export function calendarNotificationDates(
   events: ResolvedCalendarEvent[],
 ): string[] {
   return calendarDateConstraint(rule.condition, events) ?? [];
+}
+
+export function calendarPortfolioIdsForRule(
+  rule: AlertRule,
+  activePortfolioId: string,
+): string[] {
+  const ids = new Set<string>();
+  const visit = (condition: Condition): void => {
+    if (
+      (condition.kind === "date" || condition.kind === "dividend")
+      && condition.selector
+    ) {
+      ids.add(condition.selector.portfolioId?.trim() || activePortfolioId);
+      return;
+    }
+    if (condition.kind === "composite") condition.conditions.forEach(visit);
+  };
+  visit(rule.condition);
+  return Array.from(ids);
 }

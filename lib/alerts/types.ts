@@ -172,6 +172,42 @@ export type AlertRule = {
   lastValue?: number | string;
   ruleVersion?: number;
   engineVersion?: string;
+  durableSchedulerVersion?: number;
+  schedulerMigration?: {
+    kind: "legacy_cursor_bootstrap";
+    migratedAt?: unknown;
+    backlogPolicy: "skip_automatic_backlog";
+    backlogSkippedThrough: unknown;
+    initializedNextScheduledAt: unknown;
+  };
+  schedulerRecovery?: {
+    status: "requested" | "processing" | "completed";
+    requestedAt?: unknown;
+    scheduledFor: unknown;
+    occurrenceId?: string;
+    duplicateRiskAcknowledged: boolean;
+    requestedBy: "operator_audit";
+    previousNextScheduledAt?: unknown;
+    processingStartedAt?: unknown;
+    completedAt?: unknown;
+    occurrenceStatus?: NotificationStatus;
+  };
+  schedulerError?: {
+    code: string;
+    detail: string;
+    detectedAt: unknown;
+  };
+  // Canonical scheduler cursor. Firestore persists a Timestamp; older rows may
+  // contain an ISO string and are normalized by schedule.ts.
+  nextScheduledAt?: unknown;
+  lastProcessedScheduledAt?: unknown;
+  lastOccurrenceId?: string;
+  scheduleStatus?: NotificationStatus
+    | "schedule_changed"
+    | "recovery_requested"
+    | "legacy_cursor_initialized"
+    | "scheduler_error";
+  scheduleChangedAt?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
 };
@@ -192,9 +228,30 @@ export type AlertEvent = {
 
 export type NotificationChannelResult = {
   channel: DeliveryChannel;
-  status: "sent" | "failed";
+  status: "pending" | "sending" | "sent" | "failed" | "unknown";
   error?: string;
+  errorCode?: string;
+  attemptCount?: number;
+  attemptedAt?: string;
+  completedAt?: string;
 };
+
+export type NotificationStatus =
+  | "processing"
+  | "sent"
+  | "partial_failure"
+  | "failed"
+  | "skipped"
+  | "condition_false"
+  | "no_data"
+  | "stale_data"
+  | "provider_error"
+  | "evaluation_error"
+  | "skipped_quiet_hours"
+  | "skipped_cooldown"
+  | "cancelled"
+  | "disabled"
+  | "delivery_unknown";
 
 // Permanent history record (永久 보존, never deleted — UI windows the view only).
 // ruleName/tickers are denormalized search-key fields for REQ-024/REQ-044 history search.
@@ -207,6 +264,8 @@ export type NotificationLog = {
   evaluatedAt: string;
   sentAt?: string;
   evaluatedValue?: number | string;
+  evaluationStatus?: string;
+  dataObservedAt?: string;
   message: MessageTemplate;
   channels: NotificationChannelResult[];
   isTest: boolean;
@@ -214,6 +273,16 @@ export type NotificationLog = {
   severity?: AlertSeverity;
   ruleName?: string;
   tickers?: string[];
+  status?: NotificationStatus;
+  scheduledFor?: string;
+  timezone?: string;
+  processingStartedAt?: string;
+  completedAt?: string;
+  attemptCount?: number;
+  nextScheduledAt?: string;
+  nextScheduleUpdated?: boolean;
+  failureCode?: string;
+  failureReason?: string;
   createdAt?: unknown;
 };
 

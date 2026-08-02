@@ -78,6 +78,28 @@ def _is_confirmed_unregistered(exc: Optional[BaseException]) -> bool:
     return type(exc).__name__ == "UnregisteredError" or _fcm_error_code(exc).upper() == "UNREGISTERED"
 
 
+def _is_ambiguous_batch_failure(exc: BaseException) -> bool:
+    """True when a top-level FCM call may have crossed the provider boundary."""
+    code = _fcm_error_code(exc).upper().replace("-", "_")
+    definitive = {
+        "INVALID_ARGUMENT",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "SENDER_ID_MISMATCH",
+        "THIRD_PARTY_AUTH_ERROR",
+    }
+    if code in definitive:
+        return False
+    detail = f"{type(exc).__name__} {exc}".lower()
+    ambiguous_needles = (
+        "timeout", "timed out", "deadline", "connection", "transport",
+        "unavailable", "reset", "broken pipe", "eof",
+    )
+    return code in {"DEADLINE_EXCEEDED", "UNAVAILABLE", "INTERNAL", "UNKNOWN"} or any(
+        needle in detail for needle in ambiguous_needles
+    )
+
+
 class PushChannel:
     name = "push"
 
@@ -124,6 +146,9 @@ class PushChannel:
             return ChannelSendResult(
                 self.name, "failed",
                 error=f"FCM batch call failed: {detail}",
+            ) if not _is_ambiguous_batch_failure(exc) else ChannelSendResult(
+                self.name, "unknown",
+                error=f"FCM batch result unknown: {detail}",
             )
 
         # --- FULL response dump (successCount / failureCount / per-token) --------

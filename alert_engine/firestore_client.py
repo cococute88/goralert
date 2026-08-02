@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .calendar_contract import (
@@ -50,6 +53,7 @@ CALENDAR_ALERT_MARKS = "calendarAlertMarks"
 TEST_PUSH_REQUESTS = "testPushRequests"
 
 _db = None  # cached Firestore client
+_UNSET = object()
 
 
 def _init_firebase():
@@ -98,6 +102,14 @@ def get_db():
     global _db
     if _db is not None:
         return _db
+    if os.getenv("FIRESTORE_EMULATOR_HOST", "").strip():
+        from google.auth.credentials import AnonymousCredentials
+        from google.cloud import firestore as google_firestore
+
+        project_id = os.getenv("FIREBASE_PROJECT_ID", "demo-goralert").strip() or "demo-goralert"
+        _db = google_firestore.Client(project=project_id, credentials=AnonymousCredentials())
+        logger.info("Firestore Emulator client initialized project=%s", project_id)
+        return _db
     from firebase_admin import firestore  # lazy import
 
     _init_firebase()
@@ -145,13 +157,10 @@ def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
     - When ``uid`` is given: query ``users/{uid}/alertRules`` where enabled==True.
     - Otherwise: use a collection_group query across all users' ``alertRules``.
 
-    The collection_group path is most efficient with a COLLECTION_GROUP index on
-    (enabled) for the ``alertRules`` group (see ``firestore.indexes.json``). When
-    that index has not been deployed to the project, Firestore rejects the
-    filtered query with a "requires an index" error; rather than failing the
-    whole run we fall back to an unfiltered collection_group scan and filter
-    ``enabled == True`` in memory, so the engine keeps working until the index is
-    deployed (``firebase deploy --only firestore:indexes``).
+    The collection_group path requires the COLLECTION_GROUP index on ``enabled``
+    declared in ``firestore.indexes.json``. A missing index is a visible
+    infrastructure failure; we never hide it behind a whole-table scan. Durable
+    scheduled cursors catch up after the index is deployed.
     """
     db = get_db()
     rules: List[AlertRule] = []
@@ -169,26 +178,14 @@ def list_enabled_rules(uid: Optional[str] = None) -> List[AlertRule]:
             rules.append(rule)
         return rules
 
-    # All users via collection_group. Prefer the indexed (filtered) query; on a
-    # missing-index error, fall back to an unfiltered scan + in-memory filter.
-    try:
-        group = db.collection_group(ALERT_RULES).where(filter=_enabled_filter())
-        snaps = list(group.stream())
-    except Exception as exc:  # noqa: BLE001
-        if not _is_missing_index_error(exc):
-            raise
-        logger.warning(
-            "collection-group index for alertRules.enabled is missing (%s); "
-            "falling back to an unfiltered scan + in-memory filter. Deploy "
-            "firestore.indexes.json (firebase deploy --only firestore:indexes) "
-            "to restore the efficient path.",
-            exc,
-        )
-        snaps = list(db.collection_group(ALERT_RULES).stream())
+    # All users via the indexed collection_group query. Integrity is preserved
+    # on failure because no cursor is changed until an occurrence is claimed.
+    group = db.collection_group(ALERT_RULES).where(filter=_enabled_filter())
+    snaps = list(group.stream())
 
     for snap in snaps:
         data = snap.to_dict() or {}
-        # Guard: the fallback path returns disabled rules too, so filter here.
+        # Defensive guard in case malformed data reaches the result set.
         if data.get("enabled") is not True:
             continue
         rule = AlertRule.from_dict({"id": snap.id, **data})
@@ -370,6 +367,529 @@ def read_calendar_alert_marks(uid: str) -> List[Dict[str, Any]]:
 
 
 # --- NotificationLog writes + idempotency ------------------------------------
+
+TERMINAL_OCCURRENCE_STATUSES = {
+    "sent", "partial_failure", "failed", "skipped", "cancelled",
+    "disabled", "delivery_unknown", "condition_false", "no_data",
+    "stale_data", "provider_error", "evaluation_error",
+    "skipped_quiet_hours", "skipped_cooldown",
+}
+
+DURABLE_SCHEDULER_VERSION = 1
+LEGACY_BACKLOG_POLICY = "skip_automatic_backlog"
+
+
+def initialize_legacy_scheduler_cursor(
+    uid: str,
+    rule_id: str,
+    expected_trigger: Dict[str, Any],
+    expected_schedule_changed_at: Any,
+    next_scheduled_at: datetime,
+    migration_cutoff: datetime,
+) -> Dict[str, Any]:
+    """Atomically bootstrap one pre-durable rule at its first future cursor.
+
+    No occurrence/history document is created. Transaction retries re-read the
+    complete rule and converge on the winning cursor without resurrecting a
+    deleted rule or overwriting a concurrent schedule edit/recovery request.
+    """
+    from firebase_admin import firestore
+
+    db = get_db()
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    future_utc = next_scheduled_at.astimezone(timezone.utc)
+    cutoff_utc = migration_cutoff.astimezone(timezone.utc)
+
+    @firestore.transactional
+    def initialize(transaction):
+        snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            return {"initialization": "inactive", "reason": "rule_deleted"}
+        data = snap.to_dict() or {}
+        if data.get("enabled") is not True:
+            return {"initialization": "inactive", "reason": "rule_disabled"}
+        if (
+            data.get("trigger") != expected_trigger
+            or not _same_persisted_instant(
+                data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            )
+        ):
+            return {"initialization": "schedule_changed"}
+        current_cursor = data.get("nextScheduledAt")
+        if current_cursor is not None:
+            return {
+                "initialization": "already_initialized",
+                "nextScheduledAt": current_cursor,
+                "scheduleStatus": data.get("scheduleStatus"),
+            }
+        if data.get("durableSchedulerVersion") is not None or data.get("schedulerMigration") is not None:
+            return {"initialization": "corrupt_durable_scheduler"}
+
+        migration = {
+            "kind": "legacy_cursor_bootstrap",
+            "migratedAt": firestore.SERVER_TIMESTAMP,
+            "backlogPolicy": LEGACY_BACKLOG_POLICY,
+            "backlogSkippedThrough": cutoff_utc,
+            "initializedNextScheduledAt": future_utc,
+        }
+        transaction.update(rule_ref, {
+            "nextScheduledAt": future_utc,
+            "durableSchedulerVersion": DURABLE_SCHEDULER_VERSION,
+            "schedulerMigration": migration,
+            "scheduleStatus": "legacy_cursor_initialized",
+            "schedulerError": firestore.DELETE_FIELD,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        })
+        return {
+            "initialization": "initialized",
+            "nextScheduledAt": future_utc,
+            "migration": migration,
+        }
+
+    for contention_attempt in range(3):
+        try:
+            return initialize(db.transaction())
+        except Exception as exc:  # noqa: BLE001
+            if "Failed to commit transaction" not in str(exc):
+                raise
+            reconciled = rule_ref.get()
+            if not reconciled.exists:
+                return {"initialization": "inactive", "reason": "rule_deleted"}
+            data = reconciled.to_dict() or {}
+            if data.get("enabled") is not True:
+                return {"initialization": "inactive", "reason": "rule_disabled"}
+            if data.get("trigger") != expected_trigger or not _same_persisted_instant(
+                data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            ):
+                return {"initialization": "schedule_changed"}
+            if data.get("nextScheduledAt") is not None:
+                return {
+                    "initialization": "already_initialized",
+                    "nextScheduledAt": data.get("nextScheduledAt"),
+                    "scheduleStatus": data.get("scheduleStatus"),
+                    "reconciledAfterContention": True,
+                }
+            if data.get("durableSchedulerVersion") is not None or data.get("schedulerMigration") is not None:
+                return {"initialization": "corrupt_durable_scheduler"}
+            if contention_attempt == 2:
+                raise
+            stagger = (threading.get_ident() % 13) / 100
+            time.sleep(0.05 * (contention_attempt + 1) + stagger)
+
+    raise RuntimeError("unreachable legacy initialization state")
+
+
+def record_scheduler_error(
+    uid: str,
+    rule_id: str,
+    code: str,
+    detail: str,
+    detected_at: datetime,
+) -> bool:
+    """Persist rule-level scheduler corruption without creating fake history."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+
+    @firestore.transactional
+    def record(transaction):
+        snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            return False
+        transaction.update(rule_ref, {
+            "scheduleStatus": "scheduler_error",
+            "schedulerError": {
+                "code": code,
+                "detail": detail,
+                "detectedAt": detected_at.astimezone(timezone.utc),
+            },
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        })
+        return True
+
+    return bool(record(db.transaction()))
+
+
+def get_occurrence(uid: str, event_id: str) -> Optional[Dict[str, Any]]:
+    """Load one durable occurrence by its idempotency key."""
+    db = get_db()
+    snap = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id).get()
+    return (snap.to_dict() or {}) if snap.exists else None
+
+
+def claim_occurrence(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    payload: Dict[str, Any],
+    next_scheduled_at: Optional[datetime],
+    worker_id: str,
+    now: datetime,
+    lease_seconds: int = 600,
+    expected_next_scheduled_at: Any = _UNSET,
+    expected_schedule_changed_at: Any = _UNSET,
+) -> Dict[str, Any]:
+    """Create or reclaim one occurrence and advance its rule atomically.
+
+    The transaction is the scheduler's core invariant: ``nextScheduledAt`` can
+    move only in the same commit that creates the permanent occurrence record.
+    Existing terminal records are duplicates; an expired processing lease can
+    be reclaimed after a crash. Channel states marked ``sending`` are retained
+    so a recovery worker can classify them as ambiguous without re-sending.
+    """
+    from firebase_admin import firestore
+
+    db = get_db()
+    log_ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    aware_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    lease_expires = aware_now.astimezone(timezone.utc) + timedelta(seconds=max(1, lease_seconds))
+    scheduled_value: Any = payload.get("scheduledFor")
+    if isinstance(scheduled_value, str):
+        try:
+            scheduled_value = datetime.fromisoformat(scheduled_value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    def recovery_claim_metadata(rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        recovery = rule_data.get("schedulerRecovery")
+        if not isinstance(recovery, dict) or recovery.get("status") != "requested":
+            return None
+        if not _same_persisted_instant(recovery.get("scheduledFor"), scheduled_value):
+            return None
+        return {
+            **recovery,
+            "status": "processing",
+            "occurrenceId": event_id,
+            "processingStartedAt": aware_now.astimezone(timezone.utc),
+        }
+
+    @firestore.transactional
+    def claim(transaction):
+        snap = log_ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
+        rule_data = rule_snap.to_dict() or {} if rule_snap.exists else {}
+        if snap.exists:
+            data = snap.to_dict() or {}
+            status = str(data.get("status") or "processing")
+            if status in TERMINAL_OCCURRENCE_STATUSES:
+                return {"claim": "terminal", "record": data}
+            if not rule_snap.exists or rule_data.get("enabled") is not True:
+                reason = "rule_deleted" if not rule_snap.exists else "rule_disabled"
+                transaction.set(log_ref, {
+                    "status": "cancelled" if not rule_snap.exists else "disabled",
+                    "pending": False,
+                    "failureCode": reason,
+                    "failureReason": "rule was deleted or disabled after occurrence claim",
+                    "leaseOwner": firestore.DELETE_FIELD,
+                    "leaseExpiresAt": firestore.DELETE_FIELD,
+                    "completedAt": aware_now.astimezone(timezone.utc).isoformat(),
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                return {"claim": "inactive", "record": data, "reason": reason}
+            current_lease = data.get("leaseExpiresAt")
+            if isinstance(current_lease, datetime):
+                if current_lease.tzinfo is None:
+                    current_lease = current_lease.replace(tzinfo=timezone.utc)
+                if current_lease > aware_now.astimezone(timezone.utc) and data.get("leaseOwner") != worker_id:
+                    return {"claim": "in_progress", "record": data}
+            attempts = int(data.get("attemptCount") or 0) + 1
+            occurrence_updates = {
+                "status": "processing",
+                "leaseOwner": worker_id,
+                "leaseExpiresAt": lease_expires,
+                "attemptCount": attempts,
+                "processingStartedAt": aware_now.astimezone(timezone.utc).isoformat(),
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+            if not data.get("scheduledFor"):
+                # Upgrade an old reserve_log placeholder without deleting its
+                # reservedAt evidence. Channels are intentionally not copied as
+                # pending: the old worker may have crossed the provider boundary.
+                occurrence_updates.update({
+                    key: value for key, value in payload.items()
+                    if key not in {"channels", "status", "attemptCount"}
+                })
+            transaction.set(log_ref, occurrence_updates, merge=True)
+            rule_updates: Dict[str, Any] = {
+                "lastOccurrenceId": event_id,
+                "lastProcessedScheduledAt": scheduled_value,
+                "scheduleStatus": "processing",
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }
+            if next_scheduled_at is not None:
+                rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+            recovery_update = recovery_claim_metadata(rule_data)
+            if recovery_update is not None:
+                rule_updates["schedulerRecovery"] = recovery_update
+            transaction.set(rule_ref, rule_updates, merge=True)
+            return {"claim": "claimed", "record": {**data, "attemptCount": attempts}}
+
+        if not rule_snap.exists or rule_data.get("enabled") is not True:
+            return {
+                "claim": "inactive",
+                "record": None,
+                "reason": "rule_deleted" if not rule_snap.exists else "rule_disabled",
+            }
+
+        # The browser can edit a schedule after the worker queried the rule but
+        # before this transaction begins. Never let that stale worker create an
+        # occurrence from the old definition or overwrite the edited cursor.
+        if (
+            (expected_next_scheduled_at is not _UNSET and not _same_persisted_instant(
+                rule_data.get("nextScheduledAt"), expected_next_scheduled_at,
+            ))
+            or (expected_schedule_changed_at is not _UNSET and not _same_persisted_instant(
+                rule_data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            ))
+        ):
+            return {
+                "claim": "schedule_changed",
+                "record": None,
+                "reason": "schedule changed before occurrence claim",
+            }
+
+        initial = {
+            **payload,
+            "status": "processing",
+            "pending": True,
+            "attemptCount": 1,
+            "leaseOwner": worker_id,
+            "leaseExpiresAt": lease_expires,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        transaction.create(log_ref, initial)
+        rule_updates: Dict[str, Any] = {
+            "lastOccurrenceId": event_id,
+            "lastProcessedScheduledAt": scheduled_value,
+            "scheduleStatus": "processing",
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }
+        if next_scheduled_at is not None:
+            rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+        recovery_update = recovery_claim_metadata(rule_data)
+        if recovery_update is not None:
+            rule_updates["schedulerRecovery"] = recovery_update
+        transaction.set(rule_ref, rule_updates, merge=True)
+        return {"claim": "claimed", "record": initial}
+
+    for contention_attempt in range(3):
+        transaction = db.transaction()
+        try:
+            return claim(transaction)
+        except ValueError as exc:
+            # The Firestore client raises ValueError after exhausting automatic
+            # ABORTED retries. Under heavy contention the winning transaction may
+            # already have created the occurrence. A read-only reconciliation must
+            # never authorize delivery, but can safely report the durable owner so
+            # the losing worker exits without turning a normal collision into a
+            # noisy job failure.
+            if "Failed to commit transaction" not in str(exc):
+                raise
+            reconciled = log_ref.get()
+            if reconciled.exists:
+                data = reconciled.to_dict() or {}
+                if str(data.get("status") or "processing") in TERMINAL_OCCURRENCE_STATUSES:
+                    return {"claim": "terminal", "record": data, "reconciledAfterContention": True}
+                return {"claim": "in_progress", "record": data, "reconciledAfterContention": True}
+            if contention_attempt == 2:
+                raise
+            # Both contenders can be aborted by the emulator's pessimistic lock.
+            # A small deterministic worker-specific stagger lets one fresh
+            # transaction commit; production contention also benefits without
+            # weakening the atomic claim invariant.
+            stagger = (sum(ord(char) for char in worker_id) % 13) / 100
+            time.sleep(0.05 * (contention_attempt + 1) + stagger)
+
+    raise RuntimeError("unreachable occurrence claim state")
+
+
+def _same_persisted_instant(left: Any, right: Any) -> bool:
+    """Compare Firestore Timestamp/datetime/ISO values without host timezone use."""
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, datetime) and isinstance(right, datetime):
+        left_aware = left if left.tzinfo is not None else left.replace(tzinfo=timezone.utc)
+        right_aware = right if right.tzinfo is not None else right.replace(tzinfo=timezone.utc)
+        return left_aware.astimezone(timezone.utc) == right_aware.astimezone(timezone.utc)
+    return left == right
+
+
+def begin_channel_attempt(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    channel: str,
+    worker_id: str,
+    attempted_at: datetime,
+) -> str:
+    """Atomically verify rule/lease state and mark one channel as sending.
+
+    The returned value is ``began`` or a reason that forbids provider I/O:
+    ``rule_disabled``, ``rule_deleted``, ``lease_lost``, or ``not_pending``.
+    """
+    from firebase_admin import firestore
+
+    db = get_db()
+    ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def begin(transaction):
+        snap = ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            return "lease_lost"
+        data = snap.to_dict() or {}
+        if data.get("leaseOwner") != worker_id or data.get("status") in TERMINAL_OCCURRENCE_STATUSES:
+            return "lease_lost"
+        results = list(data.get("channels") or [])
+        if not rule_snap.exists or (rule_snap.to_dict() or {}).get("enabled") is not True:
+            reason = "rule_deleted" if not rule_snap.exists else "rule_disabled"
+            completed_at = attempted_at.astimezone(timezone.utc).isoformat()
+            for result in results:
+                if result.get("status") == "pending":
+                    result.update({
+                        "status": "failed",
+                        "error": "delivery cancelled because the rule became inactive before provider I/O",
+                        "errorCode": reason,
+                        "completedAt": completed_at,
+                    })
+            statuses = {str(result.get("status")) for result in results}
+            if "unknown" in statuses:
+                occurrence_status = "delivery_unknown"
+            elif "sent" in statuses:
+                occurrence_status = "partial_failure"
+            else:
+                occurrence_status = "cancelled" if reason == "rule_deleted" else "disabled"
+            transaction.set(ref, {
+                "channels": results,
+                "status": occurrence_status,
+                "pending": False,
+                "failureCode": reason,
+                "failureReason": "rule became inactive before the next provider call",
+                "completedAt": completed_at,
+                "leaseOwner": firestore.DELETE_FIELD,
+                "leaseExpiresAt": firestore.DELETE_FIELD,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+            if rule_snap.exists:
+                transaction.set(rule_ref, {
+                    "scheduleStatus": occurrence_status,
+                    "updatedAt": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+            return reason
+        changed = False
+        for result in results:
+            if result.get("channel") == channel and result.get("status") == "pending":
+                result.update({
+                    "status": "sending",
+                    "attemptCount": int(result.get("attemptCount") or 0) + 1,
+                    "attemptedAt": attempted_at.astimezone(timezone.utc).isoformat(),
+                })
+                changed = True
+                break
+        if changed:
+            transaction.set(ref, {"channels": results, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+            return "began"
+        return "not_pending"
+
+    return str(begin(transaction))
+
+
+def record_channel_result(uid: str, event_id: str, result: Dict[str, Any], worker_id: str) -> None:
+    """Persist one channel result without replacing sibling channel results."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    transaction = db.transaction()
+
+    @firestore.transactional
+    def record(transaction):
+        snap = ref.get(transaction=transaction)
+        if not snap.exists:
+            raise RuntimeError(f"occurrence disappeared: {event_id}")
+        data = snap.to_dict() or {}
+        if data.get("leaseOwner") != worker_id:
+            raise RuntimeError(f"occurrence lease lost: {event_id}")
+        results = list(data.get("channels") or [])
+        for index, current in enumerate(results):
+            if current.get("channel") == result.get("channel"):
+                results[index] = {**current, **result}
+                break
+        else:
+            results.append(dict(result))
+        transaction.set(ref, {"channels": results, "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+
+    record(transaction)
+
+
+def finalize_occurrence(
+    uid: str,
+    rule_id: str,
+    event_id: str,
+    status: str,
+    updates: Dict[str, Any],
+    rule_updates: Optional[Dict[str, Any]] = None,
+    worker_id: Optional[str] = None,
+) -> None:
+    """Finalize an occurrence and its denormalized rule status atomically."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    log_ref = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).document(event_id)
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    transaction = db.transaction()
+    clean_updates = {key: value for key, value in updates.items() if value is not None}
+    clean_rule_updates = {
+        key: value for key, value in (rule_updates or {}).items() if value is not None
+    }
+
+    @firestore.transactional
+    def finalize(transaction):
+        snap = log_ref.get(transaction=transaction)
+        rule_snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            raise RuntimeError(f"occurrence disappeared: {event_id}")
+        data = snap.to_dict() or {}
+        if worker_id is not None and data.get("leaseOwner") != worker_id:
+            raise RuntimeError(f"occurrence lease lost before finalization: {event_id}")
+        transaction.set(log_ref, {
+            **clean_updates,
+            "status": status,
+            "pending": False,
+            "leaseOwner": firestore.DELETE_FIELD,
+            "leaseExpiresAt": firestore.DELETE_FIELD,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        merged_rule_updates = {
+            "scheduleStatus": status,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+            **clean_rule_updates,
+        }
+        rule_data = rule_snap.to_dict() or {} if rule_snap.exists else {}
+        recovery = rule_data.get("schedulerRecovery")
+        if (
+            isinstance(recovery, dict)
+            and recovery.get("status") == "processing"
+            and recovery.get("occurrenceId") == event_id
+        ):
+            merged_rule_updates["schedulerRecovery"] = {
+                **recovery,
+                "status": "completed",
+                "completedAt": firestore.SERVER_TIMESTAMP,
+                "occurrenceStatus": status,
+            }
+        # A user may delete the rule after the occurrence is claimed. Finalize
+        # the permanent occurrence but never recreate a partial rule document.
+        if rule_snap.exists:
+            transaction.set(rule_ref, merged_rule_updates, merge=True)
+
+    finalize(transaction)
 
 
 def reserve_log(uid: str, event_id: str) -> bool:

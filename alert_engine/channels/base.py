@@ -12,7 +12,9 @@ from ..models import AlertSettings, MessageTemplate
 class ChannelSendResult:
     """Result of a single channel send attempt.
 
-    ``status`` is "sent" or "failed". ``invalid_tokens`` lists push tokens that
+    ``status`` is "sent", "failed", or "unknown". ``unknown`` means the
+    provider boundary was crossed but no authoritative response arrived, so
+    automatic retry could duplicate delivery. ``invalid_tokens`` lists push tokens that
     the provider reported as unregistered/invalid (push only) so the engine can
     surface cleanup. ``meta`` holds provider-specific details for logging.
     """

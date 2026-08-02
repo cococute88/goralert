@@ -31,7 +31,7 @@ const {
   normalizeAuthoritativeCalendarEvent,
   resolveGeneratedCalendarEvents,
 } = calendarContract;
-const { nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
+const { initialSchedulerCursor, nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
   "@/lib/calendar-contract": calendarContract,
 });
 
@@ -135,6 +135,127 @@ test("date selector still resolves its next occurrence from calendar events", ()
     nextRuleOccurrence(rule, [calendarEvent], new Date("2026-08-09T00:00:00.000Z"))?.toISOString(),
     "2026-08-10T00:00:00.000Z",
   );
+});
+
+test("edited schedule uses scheduleChangedAt instead of replaying from the old cursor", () => {
+  const rule = {
+    ...metricRule("07:00"),
+    kind: "date",
+    condition: { kind: "date" },
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    lastProcessedScheduledAt: "2026-06-30T22:00:00.000Z",
+    scheduleChangedAt: "2026-08-01T00:19:00.000Z",
+  };
+
+  assert.equal(
+    nextRuleOccurrence(rule, [], new Date("2026-08-01T00:20:00.000Z"))?.toISOString(),
+    "2026-08-31T22:00:00.000Z",
+  );
+});
+
+test("legacy buy-deadline token does not hide a buy-by-minus-one occurrence", () => {
+  const rule = {
+    ...metricRule("18:00"),
+    id: "sgov-sell",
+    kind: "date",
+    name: "sgov매도",
+    condition: {
+      kind: "date",
+      selector: {
+        source: "calendarEvents",
+        markFilter: ["star", "heart"],
+        match: {
+          type: ["buy_by_minus_1"],
+          titleContains: "buy-deadline",
+        },
+      },
+    },
+  };
+  const sourceEvent = {
+    ...event("SGOV", "dividend:SGOV:buy:2026-08-10"),
+    title: "SGOV 매수 마감",
+    star: true,
+    heart: true,
+  };
+
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(rule, [sourceEvent]),
+    ["2026-08-09"],
+  );
+  assert.equal(
+    nextRuleOccurrence(rule, [sourceEvent], new Date("2026-08-08T00:00:00.000Z"))?.toISOString(),
+    "2026-08-09T09:00:00.000Z",
+  );
+});
+
+test("calendar UI loads the same pinned or active portfolios as the worker selector", () => {
+  const pinned = {
+    ...metricRule("18:00"),
+    kind: "date",
+    condition: {
+      kind: "date",
+      selector: { source: "calendarEvents", portfolioId: "income" },
+    },
+  };
+  const active = {
+    ...pinned,
+    id: "active-calendar",
+    condition: {
+      kind: "date",
+      selector: { source: "calendarEvents" },
+    },
+  };
+  const composite = {
+    ...pinned,
+    id: "mixed-portfolios",
+    kind: "composite",
+    condition: {
+      kind: "composite",
+      operator: "and",
+      conditions: [pinned.condition, active.condition],
+    },
+  };
+
+  assert.deepEqual(calendarContract.calendarPortfolioIdsForRule(pinned, "growth"), ["income"]);
+  assert.deepEqual(calendarContract.calendarPortfolioIdsForRule(active, "growth"), ["growth"]);
+  assert.deepEqual(
+    calendarContract.calendarPortfolioIdsForRule(composite, "growth"),
+    ["income", "growth"],
+  );
+
+  const incomeEvent = {
+    ...event("SGOV", "income-buy"),
+    portfolioId: "income",
+    activePortfolio: false,
+  };
+  const growthEvent = {
+    ...event("QQQ", "growth-buy", "2026-09-10"),
+    portfolioId: "growth",
+    activePortfolio: true,
+  };
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(pinned, [incomeEvent, growthEvent]),
+    [incomeEvent.date],
+  );
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(active, [incomeEvent, growthEvent]),
+    [growthEvent.date],
+  );
+});
+
+test("malformed legacy timezone does not crash next-occurrence UI", () => {
+  const rule = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Not/A-Timezone" },
+    },
+  };
+
+  assert.equal(nextRuleOccurrence(rule, [], new Date("2026-08-01T00:20:00.000Z")), null);
 });
 
 test("direct selector requires a compatible identity and exact event date", () => {
@@ -266,5 +387,56 @@ test("legacy Firestore document identity still matches existing bell marks", () 
   assert.equal(
     findMatchingCalendarIdentityKey(keys, ["legacy-firestore-doc"]),
     "legacy-firestore-doc",
+  );
+});
+
+test("new recurring rule cursor is strictly future in the rule timezone", () => {
+  const cutoff = new Date("2026-08-02T00:00:00.000Z"); // 09:00 Asia/Seoul
+  assert.equal(
+    initialSchedulerCursor({
+      mode: "recurring",
+      recurrence: { kind: "monthlyLastDay", time: "12:15", tz: "Asia/Seoul" },
+    }, cutoff)?.toISOString(),
+    "2026-08-31T03:15:00.000Z",
+  );
+  assert.equal(
+    initialSchedulerCursor({
+      mode: "recurring",
+      recurrence: { kind: "calendar", time: "09:00", tz: "Asia/Seoul" },
+    }, cutoff)?.toISOString(),
+    "2026-08-03T00:00:00.000Z",
+  );
+});
+
+test("legacy UI preview ignores historical anchors and shows the first future occurrence", () => {
+  const legacy = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    createdAt: "2025-01-01T00:00:00.000Z",
+    lastTriggeredAt: "2026-07-01T00:00:00.000Z",
+  };
+
+  assert.equal(
+    nextRuleOccurrence(legacy, [], new Date("2026-08-02T00:00:00.000Z"))?.toISOString(),
+    "2026-08-31T22:00:00.000Z",
+  );
+});
+
+test("versioned rule without a cursor is displayed as corrupt without crashing", () => {
+  const corrupt = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    durableSchedulerVersion: 1,
+  };
+
+  assert.equal(
+    nextRuleOccurrence(corrupt, [], new Date("2026-08-02T00:00:00.000Z")),
+    null,
   );
 });

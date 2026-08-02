@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from alert_engine.engine import STATUS_DELIVERED, STATUS_DISABLED
+from alert_engine.engine import STATUS_DELIVERED, STATUS_DELIVERY_FAILED, STATUS_DISABLED
 
 from .conftest import FakeChannel, FakeDataSource, FakeFirestore, build_engine, make_ratio_rule
 
@@ -69,3 +69,24 @@ def test_recurring_mode_does_not_disable():
     engine.process_rule(rule, now=datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc))
 
     assert all(u["enabled"] is not False for u in fs.state_updates)
+
+
+def test_once_stays_enabled_when_every_channel_fails():
+    """A one-shot rule is consumed only after at least one confirmed send."""
+    ds = FakeDataSource(ratio=30.0)
+    fs = FakeFirestore()
+    channels = {
+        "telegram": FakeChannel("telegram", status="failed"),
+        "push": FakeChannel("push", status="failed"),
+    }
+    engine = build_engine(ds, fs, channels)
+    rule = make_ratio_rule(mode="once")
+
+    result = engine.process_rule(
+        rule,
+        now=datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert result.status == STATUS_DELIVERY_FAILED
+    assert not any(update.get("enabled") is False for update in fs.state_updates)
+    assert not any(update.get("last_triggered_at") for update in fs.state_updates)

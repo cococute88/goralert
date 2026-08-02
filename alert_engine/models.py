@@ -13,6 +13,7 @@ would clobber web-app-managed fields on merge writes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Dict, List, Optional, Union
 
 # --- literal sets (kept loose; validated by the web app) ---------------------
@@ -52,7 +53,7 @@ def _as_float(value: Any) -> Optional[float]:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    if result != result:  # NaN
+    if not math.isfinite(result):
         return None
     return result
 
@@ -374,6 +375,20 @@ class AlertRule:
     lastValue: Optional[Union[float, str]] = None
     ruleVersion: Optional[int] = None
     engineVersion: Optional[str] = None
+    # Schema version for the durable occurrence scheduler. Versioned rules
+    # without a cursor are corrupt; only pre-version legacy rows are migrated.
+    durableSchedulerVersion: Optional[int] = None
+    schedulerMigration: Optional[Dict[str, Any]] = None
+    schedulerRecovery: Optional[Dict[str, Any]] = None
+    schedulerError: Optional[Dict[str, Any]] = None
+    # Canonical scheduler cursor. Firestore stores this as a timezone-aware
+    # timestamp (UTC internally); legacy rules may omit it and are backfilled
+    # from createdAt/lastTriggeredAt by the engine.
+    nextScheduledAt: Any = None
+    lastProcessedScheduledAt: Any = None
+    lastOccurrenceId: Optional[str] = None
+    scheduleStatus: Optional[str] = None
+    scheduleChangedAt: Any = None
     createdAt: Any = None
     updatedAt: Any = None
 
@@ -401,6 +416,31 @@ class AlertRule:
             lastValue=last_value,
             ruleVersion=rule_version,
             engineVersion=_as_str(data.get("engineVersion")),
+            durableSchedulerVersion=(
+                int(data["durableSchedulerVersion"])
+                if isinstance(data.get("durableSchedulerVersion"), (int, float))
+                else None
+            ),
+            schedulerMigration=(
+                dict(data["schedulerMigration"])
+                if isinstance(data.get("schedulerMigration"), dict)
+                else None
+            ),
+            schedulerRecovery=(
+                dict(data["schedulerRecovery"])
+                if isinstance(data.get("schedulerRecovery"), dict)
+                else None
+            ),
+            schedulerError=(
+                dict(data["schedulerError"])
+                if isinstance(data.get("schedulerError"), dict)
+                else None
+            ),
+            nextScheduledAt=data.get("nextScheduledAt"),
+            lastProcessedScheduledAt=data.get("lastProcessedScheduledAt"),
+            lastOccurrenceId=_as_str(data.get("lastOccurrenceId")),
+            scheduleStatus=_as_str(data.get("scheduleStatus")),
+            scheduleChangedAt=data.get("scheduleChangedAt"),
             createdAt=data.get("createdAt"),
             updatedAt=data.get("updatedAt"),
         )
@@ -419,6 +459,15 @@ class AlertRule:
             "lastValue": self.lastValue,
             "ruleVersion": self.ruleVersion,
             "engineVersion": self.engineVersion,
+            "durableSchedulerVersion": self.durableSchedulerVersion,
+            "schedulerMigration": self.schedulerMigration,
+            "schedulerRecovery": self.schedulerRecovery,
+            "schedulerError": self.schedulerError,
+            "nextScheduledAt": self.nextScheduledAt,
+            "lastProcessedScheduledAt": self.lastProcessedScheduledAt,
+            "lastOccurrenceId": self.lastOccurrenceId,
+            "scheduleStatus": self.scheduleStatus,
+            "scheduleChangedAt": self.scheduleChangedAt,
         })
 
 
@@ -536,11 +585,23 @@ class AlertEvent:
 @dataclass
 class ChannelResult:
     channel: str
-    status: str  # "sent" | "failed"
+    status: str  # pending | sending | sent | failed | unknown
     error: Optional[str] = None
+    errorCode: Optional[str] = None
+    attemptCount: Optional[int] = None
+    attemptedAt: Optional[str] = None
+    completedAt: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return _drop_none({"channel": self.channel, "status": self.status, "error": self.error})
+        return _drop_none({
+            "channel": self.channel,
+            "status": self.status,
+            "error": self.error,
+            "errorCode": self.errorCode,
+            "attemptCount": self.attemptCount,
+            "attemptedAt": self.attemptedAt,
+            "completedAt": self.completedAt,
+        })
 
 
 @dataclass
@@ -556,10 +617,24 @@ class NotificationLog:
     isTest: bool
     sentAt: Optional[str] = None
     evaluatedValue: Optional[Union[float, str]] = None
+    evaluationStatus: Optional[str] = None
+    dataObservedAt: Optional[str] = None
     priority: Optional[str] = None
     severity: Optional[str] = None
     ruleName: Optional[str] = None
     tickers: Optional[List[str]] = None
+    # Occurrence lifecycle fields. They are optional for backward compatibility
+    # with existing permanent history documents.
+    status: Optional[str] = None
+    scheduledFor: Optional[str] = None
+    timezone: Optional[str] = None
+    processingStartedAt: Optional[str] = None
+    completedAt: Optional[str] = None
+    attemptCount: Optional[int] = None
+    nextScheduledAt: Optional[str] = None
+    nextScheduleUpdated: Optional[bool] = None
+    failureCode: Optional[str] = None
+    failureReason: Optional[str] = None
     createdAt: Any = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -572,6 +647,8 @@ class NotificationLog:
             "evaluatedAt": self.evaluatedAt,
             "sentAt": self.sentAt,
             "evaluatedValue": self.evaluatedValue,
+            "evaluationStatus": self.evaluationStatus,
+            "dataObservedAt": self.dataObservedAt,
             "message": self.message.to_dict(),
             "channels": [c.to_dict() for c in self.channels],
             "isTest": self.isTest,
@@ -579,4 +656,14 @@ class NotificationLog:
             "severity": self.severity,
             "ruleName": self.ruleName,
             "tickers": self.tickers,
+            "status": self.status,
+            "scheduledFor": self.scheduledFor,
+            "timezone": self.timezone,
+            "processingStartedAt": self.processingStartedAt,
+            "completedAt": self.completedAt,
+            "attemptCount": self.attemptCount,
+            "nextScheduledAt": self.nextScheduledAt,
+            "nextScheduleUpdated": self.nextScheduleUpdated,
+            "failureCode": self.failureCode,
+            "failureReason": self.failureReason,
         })

@@ -6,6 +6,7 @@
 
 import {
   addDoc,
+  deleteField,
   deleteDoc,
   getDoc,
   getDocs,
@@ -17,6 +18,7 @@ import {
   serverTimestamp,
   setDoc,
   startAfter,
+  Timestamp,
   updateDoc,
   where,
   type DocumentData,
@@ -58,8 +60,14 @@ import type {
   NotificationLog,
   PushDevice,
 } from "./types";
+import { DURABLE_SCHEDULER_VERSION, initialSchedulerCursor } from "./schedule";
 
 const DEFAULT_LOG_WINDOW = 200;
+const TERMINAL_SCHEDULE_STATUSES = new Set([
+  "sent", "partial_failure", "failed", "skipped", "cancelled", "disabled", "delivery_unknown",
+  "condition_false", "no_data", "stale_data", "provider_error", "evaluation_error",
+  "skipped_quiet_hours", "skipped_cooldown",
+]);
 
 function requireDb() {
   if (!firestoreDb) throw new Error("Firebase is not configured");
@@ -73,15 +81,171 @@ function defaultAlertSettings(): AlertSettings {
 
 // --- AlertRule ---------------------------------------------------------------
 
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function scheduleDefinition(rule: Pick<AlertRule, "trigger" | "condition">): string {
+  const oneShotSelector = rule.trigger.mode === "once" && "selector" in rule.condition
+    ? rule.condition.selector
+    : undefined;
+  return canonicalJson({ trigger: rule.trigger, oneShotSelector });
+}
+
+function persistedDate(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value : null;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed : null;
+  }
+  if (value && typeof value === "object" && "toDate" in value) {
+    const toDate = (value as { toDate?: unknown }).toDate;
+    if (typeof toDate === "function") {
+      const parsed = toDate.call(value) as Date;
+      return parsed instanceof Date && Number.isFinite(parsed.getTime()) ? parsed : null;
+    }
+  }
+  return null;
+}
+
+function localOccurrenceIso(instant: Date, timeZone: string): string {
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(instant)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
+  const localAsUtc = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour), Number(parts.minute), Number(parts.second),
+  );
+  const offsetMinutes = Math.round((localAsUtc - instant.getTime()) / 60_000);
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(absoluteOffset / 60)).padStart(2, "0")}:${String(absoluteOffset % 60).padStart(2, "0")}`;
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${offset}`;
+}
+
 export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void> {
   const db = requireDb();
+  // Scheduler-owned fields must never be overwritten from a stale browser
+  // snapshot. A schedule edit is committed with an explicit cancellation of
+  // the old cursor so no occurrence disappears without permanent history.
+  const {
+    nextScheduledAt: _nextScheduledAt,
+    lastProcessedScheduledAt: _lastProcessedScheduledAt,
+    lastOccurrenceId: _lastOccurrenceId,
+    scheduleStatus: _scheduleStatus,
+    scheduleChangedAt: _scheduleChangedAt,
+    lastTriggeredAt: _lastTriggeredAt,
+    lastValue: _lastValue,
+    engineVersion: _engineVersion,
+    durableSchedulerVersion: _durableSchedulerVersion,
+    schedulerMigration: _schedulerMigration,
+    schedulerRecovery: _schedulerRecovery,
+    schedulerError: _schedulerError,
+    ...editableRule
+  } = rule;
+  const writeCutoff = new Date();
+  const initialCursor = initialSchedulerCursor(rule.trigger, writeCutoff);
+  if (rule.trigger.recurrence && !initialCursor) {
+    throw new Error("유효한 다음 반복 알림 시각을 계산할 수 없습니다.");
+  }
+  const schedulerWrite = rule.trigger.recurrence && initialCursor
+    ? {
+        durableSchedulerVersion: DURABLE_SCHEDULER_VERSION,
+        nextScheduledAt: Timestamp.fromDate(initialCursor),
+      }
+    : {};
   const payload = sanitizeFirestorePayload({
-    ...rule,
+    ...editableRule,
     uid,
     updatedAt: serverTimestamp(),
     createdAt: rule.createdAt ?? serverTimestamp(),
   });
-  await setDoc(alertRuleDoc(db, uid, rule.id), payload, { merge: true });
+  const ruleRef = alertRuleDoc(db, uid, rule.id);
+  await runTransaction(db, async (transaction) => {
+    const currentSnap = await transaction.get(ruleRef);
+    if (!currentSnap.exists()) {
+      transaction.set(ruleRef, { ...payload, ...schedulerWrite }, { merge: true });
+      return;
+    }
+
+    const current = currentSnap.data() as AlertRule;
+    if (scheduleDefinition(current) === scheduleDefinition(rule)) {
+      transaction.set(ruleRef, payload, { merge: true });
+      return;
+    }
+    if (current.scheduleStatus === "processing") {
+      throw new Error("처리 중인 알림은 현재 회차가 끝난 뒤 일정을 변경할 수 있습니다.");
+    }
+
+    const cursor = persistedDate(current.nextScheduledAt);
+    let cancellationRef: ReturnType<typeof notificationLogDoc> | null = null;
+    if (cursor) {
+      const timezone = current.trigger?.recurrence?.tz || "Asia/Seoul";
+      const eventId = `${rule.id}:${localOccurrenceIso(cursor, timezone)}`;
+      cancellationRef = notificationLogDoc(db, uid, eventId);
+      const cancellationSnap = await transaction.get(cancellationRef);
+      if (cancellationSnap.exists() && !TERMINAL_SCHEDULE_STATUSES.has(cancellationSnap.data().status)) {
+        throw new Error("처리 중인 알림은 현재 회차가 끝난 뒤 일정을 변경할 수 있습니다.");
+      }
+      if (cancellationSnap.exists()) cancellationRef = null;
+      if (cancellationRef) {
+        const message = current.delivery?.message ?? { title: current.name, body: current.name };
+        transaction.set(cancellationRef, sanitizeFirestorePayload({
+          id: eventId,
+          eventId,
+          ruleId: rule.id,
+          kind: current.kind,
+          firedAt: writeCutoff.toISOString(),
+          evaluatedAt: writeCutoff.toISOString(),
+          message,
+          channels: [],
+          isTest: false,
+          ruleName: current.name,
+          status: "cancelled",
+          scheduledFor: cursor.toISOString(),
+          timezone,
+          completedAt: writeCutoff.toISOString(),
+          attemptCount: 0,
+          nextScheduleUpdated: true,
+          failureCode: "schedule_changed",
+          failureReason: "scheduled occurrence cancelled by an explicit rule schedule edit",
+          createdAt: serverTimestamp(),
+        }));
+      }
+    }
+
+    transaction.set(ruleRef, {
+      ...payload,
+      ...(rule.trigger.recurrence
+        ? schedulerWrite
+        : {
+            nextScheduledAt: deleteField(),
+            durableSchedulerVersion: deleteField(),
+          }),
+      scheduleChangedAt: serverTimestamp(),
+      scheduleStatus: "schedule_changed",
+    }, { merge: true });
+  });
 }
 
 export async function loadAlertRules(uid: string): Promise<AlertRule[]> {
@@ -177,7 +341,17 @@ export async function searchNotificationLogs(
 
   const needle = options.text?.trim().toLowerCase();
   const matches = (row: NotificationLog): boolean => {
-    if (options.status && !row.channels.some((channel) => channel.status === options.status)) return false;
+    if (options.status === "sent" && !row.channels.some((channel) => channel.status === "sent")) return false;
+    if (options.status === "failed" && !(
+      row.status === "failed"
+      || row.status === "partial_failure"
+      || row.status === "delivery_unknown"
+      || row.status === "provider_error"
+      || row.status === "evaluation_error"
+      || row.status === "stale_data"
+      || row.status === "no_data"
+      || row.channels.some((channel) => channel.status === "failed" || channel.status === "unknown")
+    )) return false;
     if (needle) {
       const haystack = [row.ruleName ?? "", ...(row.tickers ?? []), row.message?.title ?? "", row.message?.body ?? ""]
         .join(" ")

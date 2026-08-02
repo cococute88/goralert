@@ -72,6 +72,18 @@ def test_legacy_title_type_compatibility_does_not_disable_real_title_filters():
         event,
         {"type": "ex_div", "titleContains": "buy-deadline"},
     )
+    assert AlertDataSource._event_matches(
+        event,
+        {"type": "buy_by_minus_1", "titleContains": "buy-deadline"},
+    )
+    assert AlertDataSource._event_matches(
+        event,
+        {"type": ["buy_by", "buy_by_minus_1"], "titleContains": "buy-deadline"},
+    )
+    assert not AlertDataSource._event_matches(
+        event,
+        {"titleContains": "buy-deadline"},
+    )
 
 
 def test_direct_selector_passes_its_pinned_portfolio_to_calendar_reader():

@@ -7,8 +7,8 @@ Firestore camelCase shapes the Next.js web app (Sprint 1) persists under
 Design goals:
 - Stateless: all durable state lives in Firestore.
 - Defensive: a single rule / data-fetch failure never aborts the whole run.
-- Reuse: market math is imported from ``original/logic/market.py`` (Wilder RSI,
-  drawdown/MDD/temperature) — we do NOT re-implement the math.
+- Market math: Wilder RSI is implemented once in ``alert_engine/rsi.py`` and
+  reused by every RSI evaluation path.
 - Interop: field names mirror ``lib/alerts/types.ts`` EXACTLY (camelCase).
 """
 

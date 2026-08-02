@@ -20,15 +20,12 @@ GitHub Actions cron ──> python -m alert_engine.main --job-scope <scope>
         ┌─────────────────────────────────────────────┐
         │ AlertEngine.process_rule (per rule)           │
         │  1. enabled + settings.globalEnabled gate     │
-        │  2. recurrence "due now" gate                 │
-        │  3. evaluate condition (evaluator registry)   │
-        │  4. not triggered -> NO write (cross=lastValue)│
-        │  5. quiet-hours gate                          │
-        │  6. cooldown gate (lastTriggeredAt)           │
-        │  7. reserve-before-send (atomic eventId create)│
-        │  8. render + fan-out delivery (isolated)      │
-        │  9. finalize EXACTLY ONE NotificationLog      │
-        │ 10. update rule state; once -> disable        │
+        │  2. durable cursor due gate (<= worker time)  │
+        │  3. evaluate at original scheduled time       │
+        │  4. re-check schedule, atomically claim+advance│
+        │  5. persist skip/failure or channel pending   │
+        │  6. channel pending -> sending -> result      │
+        │  7. finalize occurrence + rule status         │
         └─────────────────────────────────────────────┘
                               │
                               ▼
@@ -40,9 +37,18 @@ Key design properties:
 - **Firestore is the single source of truth.** The engine is **stateless** —
   all durable state (lastTriggeredAt, lastValue, enabled, logs) lives in
   Firestore. Any run can be dropped/replayed safely.
-- **Idempotent.** Every fire maps to a stable `eventId = ruleId:bucketTime`. A
-  `NotificationLog` keyed by that id means the same event is never re-sent or
-  re-logged, even across overlapping cron runs / job scopes.
+- **Durable scheduled occurrences.** Scheduled rules persist
+  `nextScheduledAt`; a due occurrence never expires. The occurrence record and
+  next cursor are committed atomically before delivery.
+- **No automatic legacy backlog.** A pre-version recurring rule without a
+  cursor is transactionally initialized to its first strictly future
+  occurrence. The migration records `skip_automatic_backlog` metadata and does
+  not evaluate, claim, create history, or call a provider in that run.
+- **Corruption is explicit.** A versioned rule without `nextScheduledAt` is
+  recorded as a scheduler error and is never silently treated as legacy.
+- **Idempotent.** Every scheduled fire maps to a stable
+  `eventId = ruleId:scheduledWallClockTime`. Firestore create + leases prevent
+  concurrent workers from sending the same occurrence.
 - **Delivery isolation.** One channel failing (or raising) never blocks the
   others; the engine always writes exactly one log with one result per channel.
 - **Calendar is read-only.** Evaluation may READ calendar collections but never
@@ -59,7 +65,8 @@ Key design properties:
 | `evaluators/` | one evaluator per condition `kind` (metric/ratio/dividend/date/composite/custom) |
 | `channels/` | `telegram`, `push` delivery channels |
 | `compare.py` | comparator semantics (gt/gte/lt/lte/eq/crossUp/crossDown) |
-| `recurrence.py` | "due now", `next_occurrence`, `bucket_time` (Asia/Seoul) |
+| `recurrence.py` | durable due occurrence, next occurrence, timezone math |
+| `audit.py` | dry-run missing/duplicate occurrence audit + guarded recovery preparation |
 | `delivery.py` | fan-out with retry/backoff + isolation |
 | `event.py` | eventId, message rendering, event building |
 | `backtest.py` | deterministic, side-effect-free historical replay |
@@ -87,13 +94,25 @@ Gorani's calendar rendering policy. Metadata is joined by `canonicalEventId`,
 without a real event body never become alerts, and `sample`/`mock` fallback
 events are rejected.
 
-### Reuse of `original/logic/market.py`
+### Market-data and RSI policy
 
-RSI is **not** re-implemented. `datasource.py` imports
-`original.logic.market.compute_rsi` (Wilder method, pandas-only) and feeds it a
-yfinance close series. Drawdown/MDD helpers from the same module are available
-for future conditions. This is verified by `tests/test_rsi_reuse.py`, which
-asserts the metric path returns exactly `market.compute_rsi(...).iloc[-1]`.
+The repository does not contain `original/logic/market.py`. The worker uses the
+checked-in `alert_engine/rsi.py` implementation directly. It computes Wilder
+RSI from unadjusted `Close` values: the first `period` gains/losses use a simple
+average seed, and later rows use Wilder's recursive smoothing. At least
+`period + 1` numeric closes are required. `tests/test_rsi_reuse.py` checks a
+fixed, independently calculated price sequence as well as monotonic boundaries.
+
+`datasource.py` treats yfinance's `1d` timestamp as provider provenance, not as
+an implicit real-time quote. A daily bar older than 72 hours is classified as
+`stale_data` and is not compared. This conservative limit allows an ordinary
+weekend but prevents an unchanged Friday row from being silently treated as a
+current Monday-session value. It can be overridden with
+`ALERT_MAX_DAILY_BAR_AGE_HOURS` after an explicit operating-policy decision.
+Ratio inputs must each pass freshness checks and their timestamps may differ by
+at most 36 hours (`ALERT_RATIO_MAX_TIMESTAMP_SKEW_HOURS`). Provider absence,
+timeout/rate/auth failures, malformed responses, stale data, and calculation
+errors are separate evaluation outcomes and never update crossing state.
 
 ---
 
@@ -185,6 +204,7 @@ Tests are mapped to the design's correctness properties:
 | `test_recurrence.py` | recurrence cadence + eventId determinism |
 | `test_rsi_reuse.py` | reuse of `original/logic/market.compute_rsi` |
 | `test_regression.py` | recurrence stability, import surface, global kill-switch |
+| `test_legacy_scheduler_migration.py` | future-only legacy bootstrap, races, recovery separation |
 
 ---
 
@@ -197,7 +217,7 @@ Tests are mapped to the design's correctness properties:
 | `GOOGLE_APPLICATION_CREDENTIALS` | path to a service-account JSON file | alt |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot API token | for Telegram |
 | `DEFAULT_TZ` | default IANA tz (default `Asia/Seoul`) | no |
-| `ALERT_EVAL_WINDOW_MINUTES` | eval window for due/bucket (default 30; keep >= cron cadence) | no |
+| `ALERT_EVAL_WINDOW_MINUTES` | threshold bucket and malformed-legacy fallback only; scheduled cursors do not expire | no |
 | `ALERT_DELIVERY_MAX_RETRIES` | per-channel retries (default 3) | no |
 | `ALERT_DELIVERY_BACKOFF_BASE` / `ALERT_DELIVERY_BACKOFF_MAX` | backoff seconds | no |
 
@@ -222,9 +242,10 @@ The engine + tests are complete; only real secrets/data are outstanding:
       `alertSettings.pushDevices` and the compatible `pushTokens` array. The
       engine merges both sources and de-duplicates tokens; until registration
       succeeds, push fails gracefully.
-- [ ] **Firestore index** — composite/`collection_group` query on `alertRules`
-      `enabled == true` (already declared in `firestore.indexes.json`; deploy it
-      with `firebase deploy --only firestore:indexes`).
+- [ ] **Firestore indexes** — deploy the four required `notificationLogs` composites and
+      `alertRules.enabled` collection-group override from `firestore.indexes.json`
+      with `firebase deploy --only firestore:indexes --project gorani-vercel`,
+      then wait until every index is READY before enabling the worker.
 - [ ] Verify cron cadence in `.github/workflows/alert-engine.yml` (UTC; KST = UTC+9).
 
 With those in place the scheduled workflow processes live rules end to end. No
