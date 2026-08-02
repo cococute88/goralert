@@ -119,6 +119,35 @@ def test_legacy_bootstrap_is_strictly_future_at_exact_wall_clock_boundary():
     assert telegram.calls == push.calls == 0
 
 
+def test_monthly_specific_day_calendar_rule_bootstraps_without_evaluating_event():
+    rule = _legacy_rule(
+        "monthly-specific-calendar-date",
+        {"kind": "calendar", "time": "08:30", "tz": "Asia/Seoul"},
+    )
+    rule.condition.selector = {
+        "source": "calendarEvents",
+        "match": {"date": "2026-08-15", "type": "custom"},
+    }
+    datasource = FakeDataSource(events=[{
+        "id": "monthly-specific-event",
+        "date": "2026-08-15",
+        "type": "custom",
+        "title": "월 특정일",
+    }])
+    store = FakeFirestore()
+    telegram = FakeChannel("telegram")
+    push = FakeChannel("push")
+    engine = build_engine(datasource, store, {"telegram": telegram, "push": push})
+
+    result = engine.process_rule(rule, now=CUTOVER)
+
+    assert result.status == STATUS_LEGACY_CURSOR_INITIALIZED
+    assert store.legacy_cursor == datetime(2026, 8, 2, 23, 30, tzinfo=timezone.utc)
+    assert datasource.calendar_store.reads == 0
+    assert store.logs == {}
+    assert telegram.calls == push.calls == 0
+
+
 @pytest.mark.parametrize(
     ("cutover", "expected"),
     [
