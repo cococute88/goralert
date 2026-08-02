@@ -17,7 +17,10 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from alert_engine.delivery import deliver
-from alert_engine.engine import STATUS_DELIVERED
+from alert_engine.engine import (
+    STATUS_DELIVERY_FAILED,
+    STATUS_PARTIAL_FAILURE,
+)
 from alert_engine.models import AlertSettings, MessageTemplate
 
 from .conftest import FakeChannel, FakeDataSource, FakeFirestore, build_engine, make_ratio_rule
@@ -110,7 +113,7 @@ def test_partial_failure_writes_exactly_one_log_with_all_channels():
 
     r = engine.process_rule(rule, now=datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc))
 
-    assert r.status == STATUS_DELIVERED
+    assert r.status == STATUS_PARTIAL_FAILURE
     assert len(fs.logs) == 1  # Property 3: exactly one NotificationLog
     log = next(iter(fs.logs.values()))
     # One ChannelResult per requested delivery channel.
@@ -128,9 +131,13 @@ def test_all_channels_fail_still_one_log():
     engine = build_engine(ds, fs, channels)
     rule = make_ratio_rule(channels=["telegram", "push"])
 
-    engine.process_rule(rule, now=datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc))
+    result = engine.process_rule(rule, now=datetime(2024, 5, 1, 12, 0, tzinfo=timezone.utc))
 
+    assert result.status == STATUS_DELIVERY_FAILED
     assert len(fs.logs) == 1
     log = next(iter(fs.logs.values()))
+    assert log.status == "failed"
+    assert log.sentAt is None
     assert len(log.channels) == 2
     assert all(c.status == "failed" for c in log.channels)
+    assert not any(update.get("last_triggered_at") for update in fs.state_updates)

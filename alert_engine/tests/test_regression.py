@@ -62,7 +62,8 @@ def test_engine_import_surface_stable():
         "AlertEngine", "ProcessResult",
         "STATUS_DISABLED", "STATUS_NOT_DUE", "STATUS_NOT_TRIGGERED",
         "STATUS_QUIET_HOURS", "STATUS_COOLDOWN", "STATUS_DUPLICATE",
-        "STATUS_DELIVERED", "STATUS_DRY_RUN", "STATUS_ERROR",
+        "STATUS_DELIVERED", "STATUS_PARTIAL_FAILURE", "STATUS_DELIVERY_FAILED",
+        "STATUS_DELIVERY_UNKNOWN", "STATUS_DRY_RUN", "STATUS_ERROR",
     ):
         assert hasattr(engine, name), f"engine.{name} missing"
 

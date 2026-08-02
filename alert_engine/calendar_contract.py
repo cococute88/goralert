@@ -55,8 +55,15 @@ def legacy_selector_title_event_type(value: Any) -> str:
     return _LEGACY_SELECTOR_TITLE_TYPE_ALIASES.get(raw, "")
 
 
+def _legacy_title_type_is_compatible(legacy_type: str, types: Set[str]) -> bool:
+    """True when the selected alert type reads the legacy token's source event."""
+    return legacy_type in types or (
+        legacy_type == "buy_by" and "buy_by_minus_1" in types
+    )
+
+
 def calendar_selector_match_types(match: Optional[Dict[str, Any]]) -> Set[str]:
-    """Return effective types, including the old title-field compatibility."""
+    """Return normalized explicit types; title-token compatibility is separate."""
     match = match if isinstance(match, dict) else {}
     raw_types = match.get("type")
     values = raw_types if isinstance(raw_types, list) else [raw_types]
@@ -65,9 +72,6 @@ def calendar_selector_match_types(match: Optional[Dict[str, Any]]) -> Set[str]:
         for value in values
         if isinstance(value, str) and value.strip()
     }
-    legacy_type = legacy_selector_title_event_type(match.get("titleContains"))
-    if legacy_type and legacy_type in types:
-        types.add(legacy_type)
     return types
 
 
@@ -85,7 +89,7 @@ def calendar_selector_title_contains(match: Optional[Dict[str, Any]]) -> str:
         )
         if isinstance(value, str) and value.strip()
     }
-    if legacy_type and legacy_type in types:
+    if legacy_type and _legacy_title_type_is_compatible(legacy_type, types):
         return ""
     return contains
 

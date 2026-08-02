@@ -94,13 +94,25 @@ Gorani's calendar rendering policy. Metadata is joined by `canonicalEventId`,
 without a real event body never become alerts, and `sample`/`mock` fallback
 events are rejected.
 
-### Reuse of `original/logic/market.py`
+### Market-data and RSI policy
 
-RSI is **not** re-implemented. `datasource.py` imports
-`original.logic.market.compute_rsi` (Wilder method, pandas-only) and feeds it a
-yfinance close series. Drawdown/MDD helpers from the same module are available
-for future conditions. This is verified by `tests/test_rsi_reuse.py`, which
-asserts the metric path returns exactly `market.compute_rsi(...).iloc[-1]`.
+The repository does not contain `original/logic/market.py`. The worker uses the
+checked-in `alert_engine/rsi.py` implementation directly. It computes Wilder
+RSI from unadjusted `Close` values: the first `period` gains/losses use a simple
+average seed, and later rows use Wilder's recursive smoothing. At least
+`period + 1` numeric closes are required. `tests/test_rsi_reuse.py` checks a
+fixed, independently calculated price sequence as well as monotonic boundaries.
+
+`datasource.py` treats yfinance's `1d` timestamp as provider provenance, not as
+an implicit real-time quote. A daily bar older than 72 hours is classified as
+`stale_data` and is not compared. This conservative limit allows an ordinary
+weekend but prevents an unchanged Friday row from being silently treated as a
+current Monday-session value. It can be overridden with
+`ALERT_MAX_DAILY_BAR_AGE_HOURS` after an explicit operating-policy decision.
+Ratio inputs must each pass freshness checks and their timestamps may differ by
+at most 36 hours (`ALERT_RATIO_MAX_TIMESTAMP_SKEW_HOURS`). Provider absence,
+timeout/rate/auth failures, malformed responses, stale data, and calculation
+errors are separate evaluation outcomes and never update crossing state.
 
 ---
 

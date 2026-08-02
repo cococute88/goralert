@@ -96,3 +96,17 @@ def test_downtrend_rsi_matches_and_is_low():
     expected = float(compute_rsi(closes, 14).iloc[-1])
     assert value == pytest.approx(expected)
     assert value == pytest.approx(0.0)
+
+
+def test_wilder_rsi_uses_simple_average_seed_before_recursive_smoothing():
+    # Wilder's published-style worksheet sequence. The first 14 gains/losses
+    # seed a simple average; subsequent rows use the (13 * prior + current)/14
+    # recurrence. pandas ewm(adjust=False) without this seed produces ~43.20.
+    closes = pd.Series([
+        44.34, 44.09, 44.15, 43.61, 44.33,
+        44.83, 45.10, 45.42, 45.84, 46.08,
+        45.89, 46.03, 45.61, 46.28, 46.28,
+        46.00, 46.03, 46.41, 46.22, 45.64,
+    ])
+
+    assert float(compute_rsi(closes, 14).iloc[-1]) == pytest.approx(57.91502067008556)

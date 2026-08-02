@@ -60,6 +60,42 @@ function conditionHasThreshold(condition: Condition): condition is Extract<Condi
   return "threshold" in condition && "comparator" in condition;
 }
 
+function validateConditionInputs(condition: Condition, errors: string[], path = "condition"): void {
+  const metric = "metric" in condition ? condition.metric : undefined;
+  const metricTicker = metric && "ticker" in metric ? metric.ticker : undefined;
+  if (condition.kind === "ratio") {
+    if (!isNonEmptyString(condition.numerator)) errors.push(`${path}.numerator is required`);
+    if (!isNonEmptyString(condition.denominator)) errors.push(`${path}.denominator is required`);
+  }
+  if (["rsi", "price"].includes(condition.kind)) {
+    if (!isNonEmptyString(metricTicker)) errors.push(`${path}.metric.ticker is required`);
+  }
+  if (condition.kind === "rsi" && (
+    metric?.metric !== "rsi" || !Number.isInteger(metric.period) || metric.period < 1
+  )) {
+    errors.push(`${path}.metric.period must be an integer >= 1`);
+  }
+  if (condition.kind === "fx" && !isNonEmptyString(metric?.metric === "fx" ? metric.pair : undefined)) {
+    errors.push(`${path}.metric.pair is required`);
+  }
+  if (condition.kind === "koreanEtf" && !isNonEmptyString(metric?.metric === "koreanEtf" ? metric.code : undefined)) {
+    errors.push(`${path}.metric.code is required`);
+  }
+  if (["rsi", "vix", "price", "fx", "gold", "bitcoin", "koreanEtf"].includes(condition.kind)) {
+    if (metric?.metric !== condition.kind) {
+      errors.push(`${path}.metric.metric must match ${condition.kind}`);
+    }
+  }
+  if (condition.kind === "custom" && !isNonEmptyString(condition.expression)) {
+    errors.push(`${path}.expression is required`);
+  }
+  if (condition.kind === "composite") {
+    if (!["and", "or"].includes(condition.operator)) errors.push(`${path}.operator must be and or or`);
+    if (condition.conditions.length === 0) errors.push(`${path}.conditions must not be empty`);
+    condition.conditions.forEach((child, index) => validateConditionInputs(child, errors, `${path}.conditions[${index}]`));
+  }
+}
+
 export function validateAlertRule(rule: AlertRule): ValidationResult {
   const errors: string[] = [];
 
@@ -78,6 +114,10 @@ export function validateAlertRule(rule: AlertRule): ValidationResult {
     if (rule.kind !== "composite" && rule.condition.kind !== rule.kind) {
       errors.push(`condition.kind (${rule.condition.kind}) must match rule.kind (${rule.kind}) for non-composite rules`);
     }
+    if (rule.kind === "composite" && rule.condition.kind !== "composite") {
+      errors.push("condition.kind must be composite when rule.kind is composite");
+    }
+    validateConditionInputs(rule.condition, errors);
 
     // Threshold-based kinds need a finite threshold and an allowed comparator.
     if (THRESHOLD_KINDS.includes(rule.kind)) {

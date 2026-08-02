@@ -370,7 +370,9 @@ def read_calendar_alert_marks(uid: str) -> List[Dict[str, Any]]:
 
 TERMINAL_OCCURRENCE_STATUSES = {
     "sent", "partial_failure", "failed", "skipped", "cancelled",
-    "disabled", "delivery_unknown",
+    "disabled", "delivery_unknown", "condition_false", "no_data",
+    "stale_data", "provider_error", "evaluation_error",
+    "skipped_quiet_hours", "skipped_cooldown",
 }
 
 DURABLE_SCHEDULER_VERSION = 1

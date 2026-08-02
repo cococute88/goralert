@@ -9,12 +9,17 @@ import pytest
 
 from alert_engine.engine import (
     STATUS_DELIVERED,
+    STATUS_DELIVERY_FAILED,
+    STATUS_DELIVERY_UNKNOWN,
     STATUS_DISABLED,
     STATUS_DUPLICATE,
     STATUS_ERROR,
     STATUS_NOT_DUE,
+    STATUS_PARTIAL_FAILURE,
+    STATUS_COOLDOWN,
+    STATUS_QUIET_HOURS,
 )
-from alert_engine.models import AlertRule
+from alert_engine.models import AlertRule, QuietHours
 from alert_engine.recurrence import get_tz, next_scheduled_occurrence
 
 from .conftest import FakeChannel, FakeDataSource, FakeFirestore, build_engine
@@ -208,7 +213,7 @@ def test_crash_after_provider_call_never_resends_ambiguous_channel():
     rule.nextScheduledAt = datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
     second = engine.process_rule(rule, now=now + timedelta(minutes=30))
 
-    assert second.status == STATUS_DELIVERED
+    assert second.status == STATUS_DELIVERY_UNKNOWN
     assert telegram.calls == 1
     assert push.calls == 1
     final = next(iter(fs.logs.values()))
@@ -290,6 +295,37 @@ def test_rule_disabled_between_query_and_claim_never_sends():
     assert telegram.calls == push.calls == 0
 
 
+def test_due_occurrence_in_quiet_hours_is_recorded_without_delivery():
+    scheduled = datetime(2026, 8, 1, 23, 0, tzinfo=KST)
+    engine, fs, telegram, push = _engine()
+    rule = _rule("monthlyFirstDay", scheduled, "quiet-hours")
+    rule.trigger.quietHours = QuietHours("22:00", "07:00", "Asia/Seoul")
+
+    result = engine.process_rule(rule, now=scheduled)
+
+    assert result.status == STATUS_QUIET_HOURS
+    assert telegram.calls == push.calls == 0
+    log = next(iter(fs.logs.values()))
+    assert log.status == "skipped_quiet_hours"
+    assert log.failureCode == "quiet_hours"
+
+
+def test_due_occurrence_in_cooldown_is_recorded_without_delivery():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    engine, fs, telegram, push = _engine()
+    rule = _rule("monthlyFirstDay", scheduled, "cooldown")
+    rule.trigger.cooldownMinutes = 60
+    rule.lastTriggeredAt = (scheduled - timedelta(minutes=10)).isoformat()
+
+    result = engine.process_rule(rule, now=scheduled)
+
+    assert result.status == STATUS_COOLDOWN
+    assert telegram.calls == push.calls == 0
+    log = next(iter(fs.logs.values()))
+    assert log.status == "skipped_cooldown"
+    assert log.failureCode == "cooldown"
+
+
 def test_schedule_changed_between_query_and_claim_never_sends_or_advances():
     scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
     fs = ScheduleChangedClaim()
@@ -366,7 +402,7 @@ def test_legacy_reservation_without_channel_state_is_never_resent():
 
     result = engine.process_rule(rule, now=datetime(2026, 8, 1, 9, 19, tzinfo=KST))
 
-    assert result.status == STATUS_DELIVERED
+    assert result.status == STATUS_DELIVERY_UNKNOWN
     assert telegram.calls == push.calls == 0
     log = next(iter(fs.logs.values()))
     assert log.status == "delivery_unknown"
@@ -428,6 +464,25 @@ def test_one_shot_calendar_rule_advances_daily_until_target_then_disables():
     assert any(update.get("enabled") is False for update in fs.state_updates)
 
 
+def test_scheduled_once_failure_does_not_consume_rule_or_trigger_state():
+    scheduled = datetime(2026, 8, 1, 7, 0, tzinfo=KST)
+    engine, fs, _, _ = _engine(
+        telegram=FakeChannel("telegram", "failed"),
+        push=FakeChannel("push", "failed"),
+    )
+    rule = _rule("monthlyFirstDay", scheduled, "once-delivery-failure")
+    rule.trigger.mode = "once"
+
+    result = engine.process_rule(rule, now=scheduled)
+
+    assert result.status == STATUS_DELIVERY_FAILED
+    final_update = fs.state_updates[-1]
+    assert final_update["schedule_status"] == "failed"
+    assert "lastTriggeredAt" not in final_update
+    assert "lastValue" not in final_update
+    assert "enabled" not in final_update
+
+
 @pytest.mark.parametrize(
     ("telegram_status", "push_status", "expected"),
     [
@@ -451,7 +506,13 @@ def test_channel_results_are_preserved(telegram_status, push_status, expected):
         now=scheduled,
     )
 
-    assert result.status == STATUS_DELIVERED
+    expected_result_status = {
+        "sent": STATUS_DELIVERED,
+        "partial_failure": STATUS_PARTIAL_FAILURE,
+        "failed": STATUS_DELIVERY_FAILED,
+        "delivery_unknown": STATUS_DELIVERY_UNKNOWN,
+    }[expected]
+    assert result.status == expected_result_status
     log = next(iter(fs.logs.values()))
     assert log.status == expected
     assert {item.channel: item.status for item in log.channels} == {

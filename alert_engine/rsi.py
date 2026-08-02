@@ -1,4 +1,4 @@
-"""Wilder RSI computation (extracted from original/logic/market.py).
+"""Canonical Wilder RSI computation for the alert worker.
 
 Pure pandas implementation — no external TA libraries required.
 """
@@ -31,7 +31,7 @@ def _coerce_close(close) -> pd.Series:
 
 
 def compute_rsi(close, period: int = 14) -> pd.Series:
-    """Compute Wilder RSI using pandas ewm (alpha=1/period).
+    """Compute Wilder RSI with an SMA seed and recursive smoothing.
 
     Returns a Series aligned to the input index. NaN where insufficient data.
     """
@@ -48,17 +48,27 @@ def compute_rsi(close, period: int = 14) -> pd.Series:
         return pd.Series(index=series.index, dtype="float64")
 
     delta = series.diff()
-    gain = delta.clip(lower=0.0)
-    loss = -delta.clip(upper=0.0)
+    gains = delta.clip(lower=0.0)
+    losses = -delta.clip(upper=0.0)
+    result = pd.Series(float("nan"), index=series.index, dtype="float64")
 
-    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_gain = float(gains.iloc[1:period + 1].mean())
+    avg_loss = float(losses.iloc[1:period + 1].mean())
 
-    rs = avg_gain / avg_loss
-    rsi = 100.0 - (100.0 / (1.0 + rs))
+    def rsi_value(gain: float, loss: float) -> float:
+        if gain == 0 and loss == 0:
+            return 50.0
+        if loss == 0:
+            return 100.0
+        if gain == 0:
+            return 0.0
+        relative_strength = gain / loss
+        return 100.0 - (100.0 / (1.0 + relative_strength))
 
-    rsi = rsi.where(avg_loss != 0, 100.0)
-    flat_mask = (avg_gain == 0) & (avg_loss == 0)
-    rsi = rsi.mask(flat_mask, 50.0)
+    result.iloc[period] = rsi_value(avg_gain, avg_loss)
+    for position in range(period + 1, len(series)):
+        avg_gain = ((period - 1) * avg_gain + float(gains.iloc[position])) / period
+        avg_loss = ((period - 1) * avg_loss + float(losses.iloc[position])) / period
+        result.iloc[position] = rsi_value(avg_gain, avg_loss)
 
-    return rsi
+    return result

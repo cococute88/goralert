@@ -96,6 +96,13 @@ const STATUS_LABEL: Record<string, string> = {
   partial_failure: "부분 성공",
   failed: "발송 실패",
   skipped: "건너뜀(사유 기록됨)",
+  condition_false: "조건 미충족",
+  no_data: "데이터 없음",
+  stale_data: "데이터 지연",
+  provider_error: "공급자 오류",
+  evaluation_error: "계산 오류",
+  skipped_quiet_hours: "방해 금지 시간",
+  skipped_cooldown: "쿨다운",
   delivery_unknown: "발송 결과 불명",
   cancelled: "취소",
   disabled: "비활성화",
@@ -115,7 +122,15 @@ function LogRow({ log }: { log: NotificationLog }) {
               <Badge tone="accent">{alertKindLabel(log.kind)}</Badge>
               {log.isTest ? <Badge tone="warning">테스트</Badge> : null}
               {log.status ? (
-                <Badge tone={log.status === "sent" ? "success" : log.status === "processing" ? "warning" : "danger"}>
+                <Badge tone={
+                  log.status === "sent"
+                    ? "success"
+                    : log.status === "processing"
+                      ? "warning"
+                      : ["condition_false", "skipped_quiet_hours", "skipped_cooldown", "cancelled", "disabled"].includes(log.status)
+                        ? "neutral"
+                        : "danger"
+                }>
                   {STATUS_LABEL[log.status] ?? log.status}
                 </Badge>
               ) : null}
@@ -140,6 +155,9 @@ function LogRow({ log }: { log: NotificationLog }) {
           )}
           {log.evaluatedValue !== undefined ? (
             <Badge tone="neutral">값 {String(log.evaluatedValue)}</Badge>
+          ) : null}
+          {log.dataObservedAt ? (
+            <Badge tone="neutral">데이터 {formatDateTime(log.dataObservedAt, log.timezone)}</Badge>
           ) : null}
         </div>
 

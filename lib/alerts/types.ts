@@ -242,6 +242,13 @@ export type NotificationStatus =
   | "partial_failure"
   | "failed"
   | "skipped"
+  | "condition_false"
+  | "no_data"
+  | "stale_data"
+  | "provider_error"
+  | "evaluation_error"
+  | "skipped_quiet_hours"
+  | "skipped_cooldown"
   | "cancelled"
   | "disabled"
   | "delivery_unknown";
@@ -257,6 +264,8 @@ export type NotificationLog = {
   evaluatedAt: string;
   sentAt?: string;
   evaluatedValue?: number | string;
+  evaluationStatus?: string;
+  dataObservedAt?: string;
   message: MessageTemplate;
   channels: NotificationChannelResult[];
   isTest: boolean;

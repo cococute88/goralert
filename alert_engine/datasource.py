@@ -2,8 +2,9 @@
 
 RSI is computed by ``alert_engine.rsi.compute_rsi`` (Wilder method, pandas).
 
-All network/data fetches are DEFENSIVE: on any failure we return ``None`` and
-let the engine skip+warn rather than crash the whole run.
+All network/data fetches are defensive and return a structured ``DataResult``
+to evaluators. Compatibility scalar methods still return ``None`` on failure,
+but the production evaluator path preserves the exact reason and timestamp.
 
 MetricId mapping (mirrors TS MetricId union):
 - rsi        -> RSI(period) of ``ticker`` close (KOSPI -> ^KS11)
@@ -18,9 +19,19 @@ MetricId mapping (mirrors TS MetricId union):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import math
+import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from .data import (
+    DATA_CALCULATION_ERROR,
+    DATA_INVALID_INPUT,
+    DATA_NO_DATA,
+    DATA_PROVIDER_ERROR,
+    DATA_STALE,
+    DataResult,
+)
 from .models import DateEventSelector, MetricId
 from .calendar_contract import (
     calendar_event_identity_keys,
@@ -31,6 +42,10 @@ from .calendar_contract import (
 from .rsi import compute_rsi
 
 logger = logging.getLogger("alert_engine.datasource")
+
+DEFAULT_MAX_DAILY_BAR_AGE_HOURS = 72.0
+DEFAULT_RATIO_MAX_TIMESTAMP_SKEW_HOURS = 36.0
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 10.0
 
 
 # Ticker symbol aliases for yfinance.
@@ -48,7 +63,7 @@ def _resolve_symbol(ticker: str) -> str:
     if not ticker:
         return ticker
     key = ticker.strip().upper()
-    return _TICKER_ALIASES.get(key, ticker.strip())
+    return _TICKER_ALIASES.get(key, key)
 
 
 def _resolve_fx_symbol(pair: str) -> str:
@@ -80,11 +95,38 @@ class AlertDataSource:
     within a single engine run. Inject ``now_fn`` for deterministic tests.
     """
 
-    def __init__(self, now_fn=None, history_period: str = "6mo", firestore=None):
+    def __init__(
+        self,
+        now_fn=None,
+        history_period: str = "6mo",
+        firestore=None,
+        max_daily_bar_age_hours: Optional[float] = None,
+        ratio_max_timestamp_skew_hours: Optional[float] = None,
+    ):
         self._now_fn = now_fn
         self._history_period = history_period
-        self._close_cache: Dict[str, Any] = {}
+        self._close_cache: Dict[str, DataResult] = {}
         self._firestore = firestore
+        self._max_daily_bar_age = timedelta(hours=(
+            max_daily_bar_age_hours
+            if max_daily_bar_age_hours is not None
+            else float(os.environ.get(
+                "ALERT_MAX_DAILY_BAR_AGE_HOURS",
+                DEFAULT_MAX_DAILY_BAR_AGE_HOURS,
+            ))
+        ))
+        self._ratio_max_timestamp_skew = timedelta(hours=(
+            ratio_max_timestamp_skew_hours
+            if ratio_max_timestamp_skew_hours is not None
+            else float(os.environ.get(
+                "ALERT_RATIO_MAX_TIMESTAMP_SKEW_HOURS",
+                DEFAULT_RATIO_MAX_TIMESTAMP_SKEW_HOURS,
+            ))
+        ))
+        self._provider_timeout_seconds = float(os.environ.get(
+            "ALERT_PROVIDER_TIMEOUT_SECONDS",
+            DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+        ))
 
     # --- time ----------------------------------------------------------------
 
@@ -95,18 +137,55 @@ class AlertDataSource:
 
     # --- raw price history ---------------------------------------------------
 
-    def _download_close(self, symbol: str, period: Optional[str] = None):
-        """Return a pandas close Series for ``symbol`` or None on failure."""
-        if not symbol:
+    @staticmethod
+    def _provider_error(exc: Exception, action: str) -> DataResult:
+        name = type(exc).__name__.lower()
+        message = str(exc).lower()
+        if "timeout" in name or "timeout" in message or "timed out" in message:
+            code = "provider_timeout"
+        elif "ratelimit" in name or "rate limit" in message or "429" in message:
+            code = "provider_rate_limit"
+        elif any(token in name or token in message for token in ("auth", "unauthorized", "forbidden", "401", "403")):
+            code = "provider_authentication_error"
+        else:
+            code = "provider_error"
+        return DataResult.failure(
+            DATA_PROVIDER_ERROR,
+            code,
+            f"{action} failed ({type(exc).__name__})",
+            provider="yfinance",
+        )
+
+    @staticmethod
+    def _series_observed_at(close) -> Optional[datetime]:
+        try:
+            import pandas as pd
+
+            raw_timestamp = close.index[-1]
+            if isinstance(raw_timestamp, (int, float)):
+                return None
+            timestamp = pd.Timestamp(raw_timestamp)
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.tz_localize("UTC")
+            else:
+                timestamp = timestamp.tz_convert("UTC")
+            return timestamp.to_pydatetime().astimezone(timezone.utc)
+        except Exception:
             return None
+
+    def _download_close_result(self, symbol: str, period: Optional[str] = None) -> DataResult:
+        """Return a normalized daily close series with provider provenance."""
+        if not symbol:
+            return DataResult.failure(DATA_INVALID_INPUT, "missing_symbol", "market symbol is empty")
         cache_key = f"{symbol}:{period or self._history_period}"
         if cache_key in self._close_cache:
             return self._close_cache[cache_key]
         try:
             import yfinance as yf  # lazy import
         except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance unavailable (%s)", exc)
-            return None
+            result = self._provider_error(exc, "provider import")
+            logger.warning("market data status=%s code=%s symbol=%s", result.status, result.code, symbol)
+            return result
         try:
             data = yf.download(
                 symbol,
@@ -114,91 +193,328 @@ class AlertDataSource:
                 interval="1d",
                 progress=False,
                 auto_adjust=False,
+                timeout=self._provider_timeout_seconds,
             )
             if data is None or len(data) == 0:
-                self._close_cache[cache_key] = None
-                return None
+                result = DataResult.failure(
+                    DATA_NO_DATA,
+                    "symbol_no_data",
+                    "provider returned no rows; symbol may be invalid or temporarily unavailable",
+                    provider="yfinance",
+                )
+                self._close_cache[cache_key] = result
+                return result
+            if "Close" not in data:
+                result = DataResult.failure(
+                    DATA_PROVIDER_ERROR,
+                    "malformed_response",
+                    "provider response did not contain Close",
+                    provider="yfinance",
+                )
+                self._close_cache[cache_key] = result
+                return result
             close = data["Close"]
             # yfinance may return a single-column DataFrame for one symbol.
-            try:
-                import pandas as pd  # lazy import
-                if isinstance(close, pd.DataFrame):
-                    close = close.iloc[:, 0]
-            except Exception:
-                pass
-            self._close_cache[cache_key] = close
-            return close
+            import pandas as pd  # lazy import
+            if isinstance(close, pd.DataFrame):
+                if close.shape[1] != 1:
+                    result = DataResult.failure(
+                        DATA_PROVIDER_ERROR,
+                        "malformed_response",
+                        "provider returned an ambiguous Close payload",
+                        provider="yfinance",
+                    )
+                    self._close_cache[cache_key] = result
+                    return result
+                close = close.iloc[:, 0]
+            close = pd.to_numeric(close, errors="coerce")
+            close = close[~close.index.duplicated(keep="last")].sort_index().dropna()
+            if len(close) == 0:
+                result = DataResult.failure(
+                    DATA_PROVIDER_ERROR,
+                    "malformed_response",
+                    "provider Close payload contained no numeric rows",
+                    provider="yfinance",
+                )
+                self._close_cache[cache_key] = result
+                return result
+            observed_at = self._series_observed_at(close)
+            if observed_at is None:
+                result = DataResult.failure(
+                    DATA_PROVIDER_ERROR,
+                    "missing_provider_timestamp",
+                    "provider Close payload had no usable timestamp",
+                    provider="yfinance",
+                )
+                self._close_cache[cache_key] = result
+                return result
+            now = self.now()
+            aware_now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+            age = aware_now.astimezone(timezone.utc) - observed_at
+            if age < timedelta(0):
+                result = DataResult.failure(
+                    DATA_PROVIDER_ERROR,
+                    "future_provider_timestamp",
+                    "provider timestamp is later than the evaluation time",
+                    observed_at=observed_at,
+                    provider="yfinance",
+                )
+            elif age > self._max_daily_bar_age:
+                result = DataResult.failure(
+                    DATA_STALE,
+                    "daily_bar_too_old",
+                    f"latest daily bar age {age.total_seconds() / 3600:.1f}h exceeds "
+                    f"{self._max_daily_bar_age.total_seconds() / 3600:.1f}h",
+                    observed_at=observed_at,
+                    provider="yfinance",
+                )
+            else:
+                result = DataResult.success(
+                    close,
+                    observed_at=observed_at,
+                    provider="yfinance",
+                    metadata={"interval": "1d", "symbol": symbol},
+                )
+            self._close_cache[cache_key] = result
+            return result
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Price download failed for %s (%s)", symbol, exc)
-            self._close_cache[cache_key] = None
-            return None
+            result = self._provider_error(exc, "price download")
+            logger.warning("market data status=%s code=%s symbol=%s", result.status, result.code, symbol)
+            self._close_cache[cache_key] = result
+            return result
+
+    def _download_close(self, symbol: str, period: Optional[str] = None):
+        """Compatibility scalar for older callers; structured users call the result API."""
+        result = self._download_close_result(symbol, period)
+        return result.value if result.ok else None
+
+    def _last_close_result(self, symbol: str) -> DataResult:
+        downloaded = self._download_close_result(symbol)
+        if not downloaded.ok:
+            return downloaded
+        try:
+            value = float(downloaded.value.iloc[-1])
+        except Exception as exc:  # noqa: BLE001
+            return DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "value_parse_error",
+                f"latest Close could not be parsed ({type(exc).__name__})",
+                observed_at=downloaded.observed_at,
+                provider=downloaded.provider,
+            )
+        if not math.isfinite(value):
+            return DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "non_finite_value",
+                "latest Close is NaN or Infinity",
+                observed_at=downloaded.observed_at,
+                provider=downloaded.provider,
+            )
+        return DataResult.success(
+            value,
+            observed_at=downloaded.observed_at,
+            provider=downloaded.provider,
+            metadata=downloaded.metadata,
+        )
 
     def _last_close(self, symbol: str) -> Optional[float]:
-        close = self._download_close(symbol)
-        if close is None:
-            return None
-        try:
-            value = float(close.iloc[-1])
-            return value if value == value else None  # NaN guard
-        except Exception:
-            return None
+        result = self._last_close_result(symbol)
+        return result.value if result.ok else None
 
     # --- metrics -------------------------------------------------------------
 
-    def get_metric(self, metric: Optional[MetricId]) -> Optional[float]:
-        """Return the current scalar value for a MetricId, or None on failure."""
+    def get_metric_result(self, metric: Optional[MetricId]) -> DataResult:
+        """Return a metric value with absence/error/freshness classification."""
         if metric is None:
-            return None
+            return DataResult.failure(DATA_INVALID_INPUT, "missing_metric", "metric is missing")
         kind = metric.metric
         try:
             if kind == "rsi":
-                return self._get_rsi(metric.ticker or "", metric.period or 14)
+                if not (metric.ticker or "").strip():
+                    return DataResult.failure(DATA_INVALID_INPUT, "missing_ticker", "RSI ticker is empty")
+                return self._get_rsi_result(metric.ticker or "", metric.period or 14)
             if kind == "vix":
-                return self._last_close("^VIX")
+                return self._last_close_result("^VIX")
             if kind == "price":
-                return self._last_close(_resolve_symbol(metric.ticker or ""))
+                if not (metric.ticker or "").strip():
+                    return DataResult.failure(DATA_INVALID_INPUT, "missing_ticker", "price ticker is empty")
+                return self._last_close_result(_resolve_symbol(metric.ticker or ""))
             if kind == "fx":
-                return self._last_close(_resolve_fx_symbol(metric.pair or ""))
+                symbol = _resolve_fx_symbol(metric.pair or "")
+                if not symbol:
+                    return DataResult.failure(DATA_INVALID_INPUT, "missing_fx_pair", "FX pair is empty")
+                return self._last_close_result(symbol)
             if kind == "gold":
-                return self._last_close("GC=F")
+                return self._last_close_result("GC=F")
             if kind == "bitcoin":
-                return self._last_close("BTC-USD")
+                return self._last_close_result("BTC-USD")
             if kind == "koreanEtf":
-                return self._last_close(_resolve_korean_etf_symbol(metric.code or ""))
+                symbol = _resolve_korean_etf_symbol(metric.code or "")
+                if not symbol:
+                    return DataResult.failure(DATA_INVALID_INPUT, "missing_etf_code", "Korean ETF code is empty")
+                return self._last_close_result(symbol)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("get_metric failed for %s (%s)", kind, exc)
-            return None
+            result = DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "metric_calculation_error",
+                f"metric calculation failed ({type(exc).__name__})",
+            )
+            logger.warning("metric status=%s code=%s kind=%s", result.status, result.code, kind)
+            return result
         logger.warning("Unknown metric kind: %s", kind)
-        return None
+        return DataResult.failure(DATA_INVALID_INPUT, "unknown_metric", f"unsupported metric kind: {kind}")
 
-    def _get_rsi(self, ticker: str, period: int) -> Optional[float]:
+    def get_metric(self, metric: Optional[MetricId]) -> Optional[float]:
+        result = self.get_metric_result(metric)
+        return result.value if result.ok else None
+
+    def _get_rsi_result(self, ticker: str, period: int) -> DataResult:
         """Compute Wilder RSI via alert_engine.rsi.compute_rsi."""
-        close = self._download_close(_resolve_symbol(ticker), period="1y")
-        if close is None:
-            return None
+        # Preserve the test/extension seam that predates structured results:
+        # subclasses may inject a deterministic Series by overriding
+        # ``_download_close``. Production uses ``_download_close_result``.
+        if type(self)._download_close is not AlertDataSource._download_close:
+            close = self._download_close(_resolve_symbol(ticker), period="1y")
+            downloaded = (
+                DataResult.success(close, observed_at=self._series_observed_at(close))
+                if close is not None
+                else DataResult.failure(DATA_NO_DATA, "symbol_no_data", "close history returned no rows")
+            )
+        else:
+            downloaded = self._download_close_result(_resolve_symbol(ticker), period="1y")
+        if not downloaded.ok:
+            return downloaded
+        close = downloaded.value
+        if len(close) <= period:
+            return DataResult.failure(
+                DATA_NO_DATA,
+                "insufficient_rsi_history",
+                f"RSI({period}) requires at least {period + 1} closes; received {len(close)}",
+                observed_at=downloaded.observed_at,
+                provider=downloaded.provider,
+            )
         try:
             rsi_series = compute_rsi(close, period)
             if rsi_series is None or len(rsi_series) == 0:
-                return None
+                return DataResult.failure(
+                    DATA_NO_DATA,
+                    "insufficient_rsi_history",
+                    f"RSI({period}) produced no usable values",
+                    observed_at=downloaded.observed_at,
+                    provider=downloaded.provider,
+                )
             value = float(rsi_series.iloc[-1])
-            return value if value == value else None  # NaN guard
+            if not math.isfinite(value):
+                return DataResult.failure(
+                    DATA_CALCULATION_ERROR,
+                    "non_finite_rsi",
+                    "RSI result is NaN or Infinity",
+                    observed_at=downloaded.observed_at,
+                    provider=downloaded.provider,
+                )
+            return DataResult.success(
+                value,
+                observed_at=downloaded.observed_at,
+                provider=downloaded.provider,
+                metadata={**downloaded.metadata, "period": period},
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("compute_rsi failed for %s (%s)", ticker, exc)
-            return None
+            logger.warning("compute_rsi failed ticker=%s error=%s", ticker, type(exc).__name__)
+            return DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "rsi_calculation_error",
+                f"RSI calculation failed ({type(exc).__name__})",
+                observed_at=downloaded.observed_at,
+                provider=downloaded.provider,
+            )
+
+    def _get_rsi(self, ticker: str, period: int) -> Optional[float]:
+        result = self._get_rsi_result(ticker, period)
+        return result.value if result.ok else None
 
     # --- ratio ---------------------------------------------------------------
 
+    def get_ratio_result(self, numerator: str, denominator: str) -> DataResult:
+        """Return numerator/denominator without combining unavailable or skewed quotes."""
+        numerator_symbol = _resolve_symbol(numerator)
+        denominator_symbol = _resolve_symbol(denominator)
+        if not numerator_symbol or not denominator_symbol:
+            return DataResult.failure(
+                DATA_INVALID_INPUT,
+                "missing_ratio_symbol",
+                "ratio numerator and denominator are required",
+            )
+        num = self._last_close_result(numerator_symbol)
+        if not num.ok:
+            return DataResult.failure(
+                num.status,
+                f"numerator_{num.code or num.status}",
+                f"numerator {numerator_symbol}: {num.detail or num.status}",
+                observed_at=num.observed_at,
+                provider=num.provider,
+            )
+        den = self._last_close_result(denominator_symbol)
+        if not den.ok:
+            return DataResult.failure(
+                den.status,
+                f"denominator_{den.code or den.status}",
+                f"denominator {denominator_symbol}: {den.detail or den.status}",
+                observed_at=den.observed_at,
+                provider=den.provider,
+            )
+        if den.value == 0:
+            return DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "ratio_zero_denominator",
+                f"denominator {denominator_symbol} is zero",
+                observed_at=den.observed_at,
+                provider=den.provider,
+            )
+        if num.observed_at and den.observed_at:
+            skew = abs(num.observed_at - den.observed_at)
+            if skew > self._ratio_max_timestamp_skew:
+                return DataResult.failure(
+                    DATA_STALE,
+                    "ratio_timestamp_mismatch",
+                    f"ratio quote timestamps differ by {skew.total_seconds() / 3600:.1f}h; "
+                    f"maximum is {self._ratio_max_timestamp_skew.total_seconds() / 3600:.1f}h",
+                    observed_at=min(num.observed_at, den.observed_at),
+                    provider="yfinance",
+                    metadata={
+                        "numeratorObservedAt": num.observed_at.isoformat(),
+                        "denominatorObservedAt": den.observed_at.isoformat(),
+                    },
+                )
+        value = num.value / den.value
+        if not math.isfinite(value):
+            return DataResult.failure(
+                DATA_CALCULATION_ERROR,
+                "non_finite_ratio",
+                "ratio result is NaN or Infinity",
+                provider="yfinance",
+            )
+        return DataResult.success(
+            value,
+            observed_at=min(
+                (timestamp for timestamp in (num.observed_at, den.observed_at) if timestamp),
+                default=None,
+            ),
+            provider="yfinance",
+            metadata={
+                "numerator": numerator_symbol,
+                "denominator": denominator_symbol,
+                "numeratorObservedAt": num.observed_at.isoformat() if num.observed_at else None,
+                "denominatorObservedAt": den.observed_at.isoformat() if den.observed_at else None,
+            },
+        )
+
     def get_ratio(self, numerator: str, denominator: str) -> Optional[float]:
-        """Return last close(numerator) / last close(denominator), or None."""
-        num = self._last_close(_resolve_symbol(numerator))
-        den = self._last_close(_resolve_symbol(denominator))
-        if num is None or den is None or den == 0:
-            return None
-        return num / den
+        result = self.get_ratio_result(numerator, denominator)
+        return result.value if result.ok else None
 
     # --- dividend ------------------------------------------------------------
 
-    def get_dividend_metric(self, ticker: str) -> Optional[float]:
+    def get_dividend_metric_result(self, ticker: str) -> DataResult:
         """Return the most recent dividend amount for ``ticker`` via yfinance.
 
         Defensive: returns None when unavailable. Calendar-driven ex-dividend
@@ -207,30 +523,48 @@ class AlertDataSource:
         """
         symbol = _resolve_symbol(ticker)
         if not symbol:
-            return None
+            return DataResult.failure(DATA_INVALID_INPUT, "missing_ticker", "dividend ticker is empty")
         try:
             import yfinance as yf  # lazy import
         except Exception as exc:  # noqa: BLE001
-            logger.warning("yfinance unavailable for dividends (%s)", exc)
-            return None
+            return self._provider_error(exc, "dividend provider import")
         try:
             divs = yf.Ticker(symbol).dividends
             if divs is None or len(divs) == 0:
-                return None
+                return DataResult.failure(
+                    DATA_NO_DATA,
+                    "dividend_no_data",
+                    "provider returned no dividend history",
+                    provider="yfinance",
+                )
             value = float(divs.iloc[-1])
-            return value if value == value else None
+            observed_at = self._series_observed_at(divs)
+            if not math.isfinite(value):
+                return DataResult.failure(
+                    DATA_CALCULATION_ERROR,
+                    "non_finite_dividend",
+                    "latest dividend is NaN or Infinity",
+                    observed_at=observed_at,
+                    provider="yfinance",
+                )
+            return DataResult.success(value, observed_at=observed_at, provider="yfinance")
         except Exception as exc:  # noqa: BLE001
-            logger.warning("dividend fetch failed for %s (%s)", ticker, exc)
-            return None
+            result = self._provider_error(exc, "dividend fetch")
+            logger.warning("dividend status=%s code=%s ticker=%s", result.status, result.code, ticker)
+            return result
+
+    def get_dividend_metric(self, ticker: str) -> Optional[float]:
+        result = self.get_dividend_metric_result(ticker)
+        return result.value if result.ok else None
 
     # --- calendar (READ-ONLY) ------------------------------------------------
 
-    def get_calendar_events(
+    def get_calendar_events_result(
         self,
         uid: str,
         selector: Optional[DateEventSelector],
         firestore=None,
-    ) -> List[Dict[str, Any]]:
+    ) -> DataResult:
         """Return calendar events matching ``selector`` (read-only).
 
         Honors:
@@ -259,8 +593,13 @@ class AlertDataSource:
             else:
                 events = firestore.read_calendar_events(uid, portfolio_id=portfolio_id)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("calendar read failure source=%s (%s)", source, exc)
-            return []
+            logger.warning("calendar read failure source=%s error=%s", source, type(exc).__name__)
+            return DataResult.failure(
+                DATA_PROVIDER_ERROR,
+                "calendar_read_error",
+                f"calendar read failed ({type(exc).__name__})",
+                provider="firestore",
+            )
 
         match = (selector.match if selector else None) or {}
         mark_filter = (selector.markFilter if selector else None) or []
@@ -283,7 +622,16 @@ class AlertDataSource:
             len(result),
             mark_filter,
         )
-        return result
+        return DataResult.success(result, provider="firestore")
+
+    def get_calendar_events(
+        self,
+        uid: str,
+        selector: Optional[DateEventSelector],
+        firestore=None,
+    ) -> List[Dict[str, Any]]:
+        result = self.get_calendar_events_result(uid, selector, firestore)
+        return result.value if result.ok else []
 
     @staticmethod
     def _event_matches(event: Dict[str, Any], match: Dict[str, Any]) -> bool:

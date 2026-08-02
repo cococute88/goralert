@@ -76,14 +76,33 @@ class ProcessResult:
 
 STATUS_DISABLED = "skipped_disabled"
 STATUS_NOT_DUE = "not_due"
-STATUS_NOT_TRIGGERED = "not_triggered"
+STATUS_NOT_TRIGGERED = "condition_false"
+STATUS_NO_DATA = "no_data"
+STATUS_STALE_DATA = "stale_data"
+STATUS_PROVIDER_ERROR = "provider_error"
+STATUS_EVALUATION_ERROR = "evaluation_error"
 STATUS_QUIET_HOURS = "skipped_quiet_hours"
 STATUS_COOLDOWN = "skipped_cooldown"
 STATUS_DUPLICATE = "skipped_duplicate"
 STATUS_DELIVERED = "delivered"
+STATUS_PARTIAL_FAILURE = "partial_failure"
+STATUS_DELIVERY_FAILED = "failed"
+STATUS_DELIVERY_UNKNOWN = "delivery_unknown"
 STATUS_DRY_RUN = "dry_run"
 STATUS_ERROR = "error"
 STATUS_LEGACY_CURSOR_INITIALIZED = "legacy_cursor_initialized"
+
+
+def _classify_delivery(results: List[ChannelResult]) -> tuple[str, str]:
+    """Return the durable occurrence status and public process status."""
+    statuses = [result.status for result in results]
+    if statuses and all(status == "sent" for status in statuses):
+        return "sent", STATUS_DELIVERED
+    if "unknown" in statuses:
+        return "delivery_unknown", STATUS_DELIVERY_UNKNOWN
+    if "sent" in statuses:
+        return "partial_failure", STATUS_PARTIAL_FAILURE
+    return "failed", STATUS_DELIVERY_FAILED
 
 
 def _within_quiet_hours(quiet, now: datetime) -> bool:
@@ -204,6 +223,23 @@ class AlertEngine:
         #    cross detection is impossible. Every other comparator performs ZERO
         #    writes here, saving Firestore write quota on every poll cycle.
         if not eval_result.triggered:
+            if eval_result.status not in {None, "condition_false"}:
+                status = {
+                    "no_data": STATUS_NO_DATA,
+                    "stale_data": STATUS_STALE_DATA,
+                    "provider_error": STATUS_PROVIDER_ERROR,
+                    "evaluation_error": STATUS_EVALUATION_ERROR,
+                }.get(eval_result.status, STATUS_EVALUATION_ERROR)
+                logger.warning(
+                    "evaluation unavailable alertId=%s ruleId=%s status=%s code=%s observedAt=%s detail=%s",
+                    rule.id,
+                    rule.id,
+                    status,
+                    eval_result.failure_code,
+                    eval_result.observed_at.isoformat() if eval_result.observed_at else None,
+                    eval_result.detail,
+                )
+                return ProcessResult(rule.id, rule.uid, status, eval_result.detail, eval_result.value)
             if (
                 not dry_run
                 and eval_result.value is not None
@@ -274,6 +310,22 @@ class AlertEngine:
         )
         sent_at = as_utc(now).isoformat() if outcome.any_sent else None
         event.sentAt = sent_at
+        occurrence_status, process_status = _classify_delivery(outcome.results)
+        completed_at = as_utc(now).isoformat()
+        failure_code = (
+            "delivery_unknown"
+            if occurrence_status == "delivery_unknown"
+            else "all_channels_failed"
+            if occurrence_status == "failed"
+            else None
+        )
+        failure_reason = (
+            "at least one channel returned an ambiguous delivery result"
+            if occurrence_status == "delivery_unknown"
+            else "no requested channel confirmed delivery"
+            if occurrence_status == "failed"
+            else None
+        )
 
         # 9. finalize the reserved NotificationLog (overwrites the reservation)
         log = NotificationLog(
@@ -285,11 +337,21 @@ class AlertEngine:
             evaluatedAt=event.evaluatedAt,
             sentAt=sent_at,
             evaluatedValue=eval_result.value,
+            evaluationStatus=eval_result.status,
+            dataObservedAt=(
+                eval_result.observed_at.isoformat()
+                if eval_result.observed_at
+                else None
+            ),
             message=message,
             channels=outcome.results,
             isTest=False,
             ruleName=rule.name,
             tickers=self._tickers(rule) or None,
+            status=occurrence_status,
+            completedAt=completed_at,
+            failureCode=failure_code,
+            failureReason=failure_reason,
         )
         try:
             self.firestore.write_notification_log(rule.uid, log)
@@ -297,22 +359,25 @@ class AlertEngine:
             logger.error("write_notification_log failed rule=%s (%s)", rule.id, exc)
             return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"log write failed: {exc}", eval_result.value, event_id)
 
-        # 10. update rule state; once -> disable
-        try:
-            disable = (trigger.mode == "once") if trigger else False
-            self.firestore.update_rule_state(
-                rule.uid, rule.id,
-                last_triggered_at=event.firedAt,
-                last_value=eval_result.value,
-                enabled=False if disable else None,
-                engine_version=self.config.engine_version,
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("update_rule_state failed rule=%s (%s)", rule.id, exc)
+        # 10. A failed/ambiguous attempt is not a confirmed trigger. Preserve
+        # lastTriggeredAt and once-mode enabled state so a definitive failure
+        # cannot silently consume the alert.
+        if outcome.any_sent:
+            try:
+                disable = (trigger.mode == "once") if trigger else False
+                self.firestore.update_rule_state(
+                    rule.uid, rule.id,
+                    last_triggered_at=event.firedAt,
+                    last_value=eval_result.value,
+                    enabled=False if disable else None,
+                    engine_version=self.config.engine_version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("update_rule_state failed rule=%s (%s)", rule.id, exc)
 
         self._cleanup_invalid_push_tokens(rule.uid, rule.id, outcome.invalid_push_tokens)
 
-        return ProcessResult(rule.id, rule.uid, STATUS_DELIVERED, eval_result.detail, eval_result.value, event_id, log)
+        return ProcessResult(rule.id, rule.uid, process_status, eval_result.detail, eval_result.value, event_id, log)
 
     def _process_scheduled_rule(
         self,
@@ -456,7 +521,9 @@ class AlertEngine:
                 return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"pending occurrence load failed: {exc}")
             if resume_record and resume_record.get("status") not in {
                 "sent", "partial_failure", "failed", "skipped", "cancelled",
-                "disabled", "delivery_unknown",
+                "disabled", "delivery_unknown", "condition_false", "no_data",
+                "stale_data", "provider_error", "evaluation_error",
+                "skipped_quiet_hours", "skipped_cooldown",
             }:
                 resume_event_id = rule.lastOccurrenceId
             elif resume_record and resume_record.get("status"):
@@ -559,6 +626,9 @@ class AlertEngine:
                 triggered=True,
                 value=resume_record.get("evaluatedValue"),
                 detail="resumed durable occurrence",
+                status="triggered",
+                failure_code=None,
+                observed_at=None,
             )
             stored_message = resume_record.get("message") or {}
             message = MessageTemplate(
@@ -601,15 +671,19 @@ class AlertEngine:
             message = render_message(rule, variables)
 
             if eval_error:
-                skip_status, skip_code, skip_reason = "failed", "evaluation_error", eval_error
+                skip_status, skip_code, skip_reason = "evaluation_error", "evaluation_error", eval_error
+            elif eval_result.status not in {None, "triggered", "condition_false"}:
+                skip_status = eval_result.status
+                skip_code = eval_result.failure_code or eval_result.status
+                skip_reason = eval_result.detail
             elif not eval_result.triggered:
-                skip_status, skip_code, skip_reason = "skipped", "condition_not_met", eval_result.detail
+                skip_status, skip_code, skip_reason = "condition_false", "condition_not_met", eval_result.detail
             elif _within_quiet_hours(trigger.quietHours, now):
-                skip_status, skip_code, skip_reason = "skipped", "quiet_hours", "within quiet hours"
+                skip_status, skip_code, skip_reason = "skipped_quiet_hours", "quiet_hours", "within quiet hours"
             elif trigger.cooldownMinutes:
                 last = _parse_iso(rule.lastTriggeredAt)
                 if last is not None and now - last < timedelta(minutes=trigger.cooldownMinutes):
-                    skip_status, skip_code, skip_reason = "skipped", "cooldown", "within cooldown"
+                    skip_status, skip_code, skip_reason = "skipped_cooldown", "cooldown", "within cooldown"
 
         pending_channels = [] if skip_status else [
             ChannelResult(channel, "pending", attemptCount=0) for channel in rule.delivery.channels
@@ -622,6 +696,12 @@ class AlertEngine:
             firedAt=processing_started,
             evaluatedAt=processing_started,
             evaluatedValue=eval_result.value if eval_result else None,
+            evaluationStatus=eval_result.status if eval_result else "evaluation_error",
+            dataObservedAt=(
+                eval_result.observed_at.isoformat()
+                if eval_result and eval_result.observed_at
+                else None
+            ),
             message=message,
             channels=pending_channels,
             isTest=False,
@@ -687,6 +767,14 @@ class AlertEngine:
 
         completed_at = as_utc(now).isoformat()
         if skip_status:
+            rule_updates = {"engineVersion": self.config.engine_version}
+            if (
+                eval_result
+                and eval_result.status == "condition_false"
+                and eval_result.value is not None
+                and self._needs_prev_value(rule.condition)
+            ):
+                rule_updates["lastValue"] = eval_result.value
             try:
                 self.firestore.finalize_occurrence(
                     rule.uid, rule.id, event_id, skip_status,
@@ -695,13 +783,22 @@ class AlertEngine:
                         "failureCode": skip_code,
                         "failureReason": skip_reason,
                     },
-                    {"engineVersion": self.config.engine_version},
+                    rule_updates,
                     worker_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("occurrence finalization failed occurrenceId=%s", event_id)
                 return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"finalization failed: {exc}", event_id=event_id)
-            result_status = STATUS_ERROR if skip_status == "failed" else STATUS_NOT_TRIGGERED
+            result_status = {
+                "condition_false": STATUS_NOT_TRIGGERED,
+                "no_data": STATUS_NO_DATA,
+                "stale_data": STATUS_STALE_DATA,
+                "provider_error": STATUS_PROVIDER_ERROR,
+                "evaluation_error": STATUS_EVALUATION_ERROR,
+                "skipped_quiet_hours": STATUS_QUIET_HOURS,
+                "skipped_cooldown": STATUS_COOLDOWN,
+                "failed": STATUS_ERROR,
+            }.get(skip_status, STATUS_NOT_TRIGGERED)
             return ProcessResult(
                 rule.id, rule.uid, result_status, skip_reason,
                 eval_result.value if eval_result else None, event_id, placeholder,
@@ -801,23 +898,14 @@ class AlertEngine:
                 rule.id, rule.id, event_id, channel_name, channel_status, error_code,
             )
 
-        statuses = [result.status for result in results]
-        if statuses and all(status == "sent" for status in statuses):
-            occurrence_status = "sent"
-        elif "unknown" in statuses:
-            occurrence_status = "delivery_unknown"
-        elif "sent" in statuses:
-            occurrence_status = "partial_failure"
-        else:
-            occurrence_status = "failed"
+        occurrence_status, process_status = _classify_delivery(results)
         completed_at = as_utc(now).isoformat()
-        rule_updates = {
-            "engineVersion": self.config.engine_version,
-            "lastValue": eval_result.value,
-        }
+        rule_updates = {"engineVersion": self.config.engine_version}
+        if sent_at or occurrence_status == "delivery_unknown":
+            rule_updates["lastValue"] = eval_result.value
         if sent_at:
             rule_updates["lastTriggeredAt"] = processing_started
-        if trigger.mode == "once":
+        if trigger.mode == "once" and sent_at:
             rule_updates["enabled"] = False
         try:
             self.firestore.finalize_occurrence(
@@ -854,7 +942,7 @@ class AlertEngine:
             }
         )
         return ProcessResult(
-            rule.id, rule.uid, STATUS_DELIVERED,
+            rule.id, rule.uid, process_status,
             f"occurrence={occurrence_status} scheduledFor={scheduled_utc.isoformat()} delaySeconds={delay_seconds}",
             eval_result.value, event_id, log,
         )

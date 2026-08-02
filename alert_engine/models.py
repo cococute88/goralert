@@ -13,6 +13,7 @@ would clobber web-app-managed fields on merge writes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Any, Dict, List, Optional, Union
 
 # --- literal sets (kept loose; validated by the web app) ---------------------
@@ -52,7 +53,7 @@ def _as_float(value: Any) -> Optional[float]:
         result = float(value)
     except (TypeError, ValueError):
         return None
-    if result != result:  # NaN
+    if not math.isfinite(result):
         return None
     return result
 
@@ -616,6 +617,8 @@ class NotificationLog:
     isTest: bool
     sentAt: Optional[str] = None
     evaluatedValue: Optional[Union[float, str]] = None
+    evaluationStatus: Optional[str] = None
+    dataObservedAt: Optional[str] = None
     priority: Optional[str] = None
     severity: Optional[str] = None
     ruleName: Optional[str] = None
@@ -644,6 +647,8 @@ class NotificationLog:
             "evaluatedAt": self.evaluatedAt,
             "sentAt": self.sentAt,
             "evaluatedValue": self.evaluatedValue,
+            "evaluationStatus": self.evaluationStatus,
+            "dataObservedAt": self.dataObservedAt,
             "message": self.message.to_dict(),
             "channels": [c.to_dict() for c in self.channels],
             "isTest": self.isTest,

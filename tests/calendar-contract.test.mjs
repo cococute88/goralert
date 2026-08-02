@@ -156,6 +156,96 @@ test("edited schedule uses scheduleChangedAt instead of replaying from the old c
   );
 });
 
+test("legacy buy-deadline token does not hide a buy-by-minus-one occurrence", () => {
+  const rule = {
+    ...metricRule("18:00"),
+    id: "sgov-sell",
+    kind: "date",
+    name: "sgov매도",
+    condition: {
+      kind: "date",
+      selector: {
+        source: "calendarEvents",
+        markFilter: ["star", "heart"],
+        match: {
+          type: ["buy_by_minus_1"],
+          titleContains: "buy-deadline",
+        },
+      },
+    },
+  };
+  const sourceEvent = {
+    ...event("SGOV", "dividend:SGOV:buy:2026-08-10"),
+    title: "SGOV 매수 마감",
+    star: true,
+    heart: true,
+  };
+
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(rule, [sourceEvent]),
+    ["2026-08-09"],
+  );
+  assert.equal(
+    nextRuleOccurrence(rule, [sourceEvent], new Date("2026-08-08T00:00:00.000Z"))?.toISOString(),
+    "2026-08-09T09:00:00.000Z",
+  );
+});
+
+test("calendar UI loads the same pinned or active portfolios as the worker selector", () => {
+  const pinned = {
+    ...metricRule("18:00"),
+    kind: "date",
+    condition: {
+      kind: "date",
+      selector: { source: "calendarEvents", portfolioId: "income" },
+    },
+  };
+  const active = {
+    ...pinned,
+    id: "active-calendar",
+    condition: {
+      kind: "date",
+      selector: { source: "calendarEvents" },
+    },
+  };
+  const composite = {
+    ...pinned,
+    id: "mixed-portfolios",
+    kind: "composite",
+    condition: {
+      kind: "composite",
+      operator: "and",
+      conditions: [pinned.condition, active.condition],
+    },
+  };
+
+  assert.deepEqual(calendarContract.calendarPortfolioIdsForRule(pinned, "growth"), ["income"]);
+  assert.deepEqual(calendarContract.calendarPortfolioIdsForRule(active, "growth"), ["growth"]);
+  assert.deepEqual(
+    calendarContract.calendarPortfolioIdsForRule(composite, "growth"),
+    ["income", "growth"],
+  );
+
+  const incomeEvent = {
+    ...event("SGOV", "income-buy"),
+    portfolioId: "income",
+    activePortfolio: false,
+  };
+  const growthEvent = {
+    ...event("QQQ", "growth-buy", "2026-09-10"),
+    portfolioId: "growth",
+    activePortfolio: true,
+  };
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(pinned, [incomeEvent, growthEvent]),
+    [incomeEvent.date],
+  );
+  assert.deepEqual(
+    calendarContract.calendarNotificationDates(active, [incomeEvent, growthEvent]),
+    [growthEvent.date],
+  );
+});
+
 test("malformed legacy timezone does not crash next-occurrence UI", () => {
   const rule = {
     ...metricRule("07:00"),

@@ -15,6 +15,7 @@
     "test:calendar-view": "node --test tests/calendar-view.test.mjs",
     "test:calendar-display": "node --test tests/calendar-display.test.mjs",
     "test:calendar-alerts": "node --test tests/calendar-alerts.test.mjs",
+    "test:alert-contract": "node --test tests/alert-rule-contract.test.mjs",
     "test:firestore-emulator": "firebase emulators:exec --only auth,firestore --project demo-goralert \"node scripts/run-firestore-emulator-tests.mjs\""
   },
   "dependencies": {

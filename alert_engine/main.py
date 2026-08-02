@@ -32,7 +32,16 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from .config import load_config
-from .engine import AlertEngine, STATUS_DELIVERED, STATUS_ERROR
+from .engine import (
+    AlertEngine,
+    STATUS_DELIVERED,
+    STATUS_DELIVERY_FAILED,
+    STATUS_DELIVERY_UNKNOWN,
+    STATUS_ERROR,
+    STATUS_EVALUATION_ERROR,
+    STATUS_PARTIAL_FAILURE,
+    STATUS_PROVIDER_ERROR,
+)
 from .models import AlertRule, AlertSettings
 
 logger = logging.getLogger("alert_engine.main")
@@ -156,7 +165,14 @@ def run(argv: Optional[List[str]] = None) -> int:
                 status_counts[result.status] += 1
                 if result.status == STATUS_DELIVERED:
                     delivered += 1
-                if result.status == STATUS_ERROR:
+                if result.status in {
+                    STATUS_ERROR,
+                    STATUS_EVALUATION_ERROR,
+                    STATUS_PROVIDER_ERROR,
+                    STATUS_PARTIAL_FAILURE,
+                    STATUS_DELIVERY_FAILED,
+                    STATUS_DELIVERY_UNKNOWN,
+                }:
                     errors += 1
                 logger.info(
                     "alertId=%s ruleId=%s uid=%s occurrenceId=%s -> %s%s",

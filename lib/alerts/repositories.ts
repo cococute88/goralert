@@ -65,6 +65,8 @@ import { DURABLE_SCHEDULER_VERSION, initialSchedulerCursor } from "./schedule";
 const DEFAULT_LOG_WINDOW = 200;
 const TERMINAL_SCHEDULE_STATUSES = new Set([
   "sent", "partial_failure", "failed", "skipped", "cancelled", "disabled", "delivery_unknown",
+  "condition_false", "no_data", "stale_data", "provider_error", "evaluation_error",
+  "skipped_quiet_hours", "skipped_cooldown",
 ]);
 
 function requireDb() {
@@ -344,6 +346,10 @@ export async function searchNotificationLogs(
       row.status === "failed"
       || row.status === "partial_failure"
       || row.status === "delivery_unknown"
+      || row.status === "provider_error"
+      || row.status === "evaluation_error"
+      || row.status === "stale_data"
+      || row.status === "no_data"
       || row.channels.some((channel) => channel.status === "failed" || channel.status === "unknown")
     )) return false;
     if (needle) {

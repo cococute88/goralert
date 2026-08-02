@@ -10,12 +10,26 @@ import { Bell, CalendarClock, Plus, Send } from "lucide-react";
 import { useFirebaseAuth } from "@/lib/firebase/auth";
 import type { AlertRule, NotificationLog } from "@/lib/alerts/types";
 import type { ResolvedCalendarEvent } from "@/lib/calendar-types";
-import { loadResolvedCalendarEvents } from "@/lib/calendar-reader";
+import { loadAlertRuleCalendarEvents } from "@/lib/calendar-reader";
 import { loadAlertRules, loadNotificationLogs } from "@/lib/alerts/repositories";
 import { formatNextOccurrence, nextRuleOccurrence, occurrenceIsToday } from "@/lib/alerts/schedule";
 import { Badge, Button, Card, CardSection, EmptyState } from "@/components/alerts/ui";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import AlertKindBadge from "@/components/alerts/forms/AlertKindBadge";
+
+const LOG_STATUS_LABEL: Record<string, string> = {
+  sent: "발송 성공",
+  partial_failure: "부분 성공",
+  failed: "발송 실패",
+  condition_false: "조건 미충족",
+  no_data: "데이터 없음",
+  stale_data: "데이터 지연",
+  provider_error: "공급자 오류",
+  evaluation_error: "계산 오류",
+  skipped_quiet_hours: "방해 금지 시간",
+  skipped_cooldown: "쿨다운",
+  delivery_unknown: "발송 결과 불명",
+};
 
 type RuleWithNext = { rule: AlertRule; next: Date | null };
 
@@ -54,7 +68,7 @@ export default function GoralertHome() {
   const { user, loading: authLoading } = useFirebaseAuth();
   const [rules, setRules] = useState<AlertRule[]>([]);
   const [logs, setLogs] = useState<NotificationLog[]>([]);
-  const [calendarEvents, setCalendarEvents] = useState<ResolvedCalendarEvent[]>([]);
+  const [calendarEventsByRule, setCalendarEventsByRule] = useState<Record<string, ResolvedCalendarEvent[]>>({});
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -64,22 +78,27 @@ export default function GoralertHome() {
     Promise.allSettled([
       loadAlertRules(user.uid),
       loadNotificationLogs(user.uid, { limit: 5 }),
-      loadResolvedCalendarEvents(user.uid),
     ])
-      .then(([rulesResult, logsResult, calendarResult]) => {
+      .then(async ([rulesResult, logsResult]) => {
         if (!active) return;
-        setRules(rulesResult.status === "fulfilled" ? rulesResult.value : []);
-        setLogs(logsResult.status === "fulfilled" ? logsResult.value : []);
-        setCalendarEvents(calendarResult.status === "fulfilled" ? calendarResult.value : []);
-        if (calendarResult.status === "rejected") {
-          console.error("[calendar-contract] dashboard read failed", calendarResult.reason);
+        const loadedRules = rulesResult.status === "fulfilled" ? rulesResult.value : [];
+        let calendarEvents: Record<string, ResolvedCalendarEvent[]> = {};
+        try {
+          calendarEvents = await loadAlertRuleCalendarEvents(user.uid, loadedRules);
+        } catch (reason) {
+          console.error("[calendar-contract] dashboard read failed", reason);
         }
+        if (!active) return;
+        setRules(loadedRules);
+        setLogs(logsResult.status === "fulfilled" ? logsResult.value : []);
+        setCalendarEventsByRule(calendarEvents);
       })
-      .catch(() => {
+      .catch((reason) => {
+        console.error("[dashboard] read failed", reason);
         if (!active) return;
         setRules([]);
         setLogs([]);
-        setCalendarEvents([]);
+        setCalendarEventsByRule({});
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -94,7 +113,7 @@ export default function GoralertHome() {
     const enabled = rules.filter((rule) => rule.enabled);
     const withNext: RuleWithNext[] = enabled.map((rule) => ({
       rule,
-      next: nextRuleOccurrence(rule, calendarEvents, now),
+      next: nextRuleOccurrence(rule, calendarEventsByRule[rule.id] ?? [], now),
     }));
 
     // "오늘 예정" = 다음 발송 시각이 오늘로 계산되는 (예측 가능한) 룰만.
@@ -108,7 +127,7 @@ export default function GoralertHome() {
       .sort((a, b) => a.next!.getTime() - b.next!.getTime())
       .slice(0, 5);
     return { todayRules: today, upcomingRules: scheduledUpcoming };
-  }, [calendarEvents, rules]);
+  }, [calendarEventsByRule, rules]);
 
   if (authLoading) return <LoadingState />;
   if (!user) return <NoUserState />;
@@ -161,7 +180,7 @@ export default function GoralertHome() {
       </section>
 
       <section>
-        <SectionTitle icon={<Send size={16} />} title="최근 발송 알림" count={logs.length} />
+        <SectionTitle icon={<Send size={16} />} title="최근 알림 평가" count={logs.length} />
         {logs.length === 0 ? (
           <EmptyState title="발송된 알림이 없어요" description="알림이 발송되면 여기에 기록이 표시됩니다." />
         ) : (
@@ -175,6 +194,7 @@ export default function GoralertHome() {
                     </span>
                     <div className="flex items-center gap-1">
                       {log.isTest ? <Badge tone="warning">테스트</Badge> : null}
+                      {log.status ? <Badge>{LOG_STATUS_LABEL[log.status] ?? log.status}</Badge> : null}
                       <AlertKindBadge kind={log.kind} />
                     </div>
                   </div>

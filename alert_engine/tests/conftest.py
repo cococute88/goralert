@@ -253,7 +253,9 @@ class FakeFirestore:
                 data = existing if isinstance(existing, dict) else vars(existing)
                 if data.get("status") in {
                     "sent", "partial_failure", "failed", "skipped", "cancelled",
-                    "disabled", "delivery_unknown",
+                    "disabled", "delivery_unknown", "condition_false", "no_data",
+                    "stale_data", "provider_error", "evaluation_error",
+                    "skipped_quiet_hours", "skipped_cooldown",
                 }:
                     return {"claim": "terminal", "record": data}
                 owner = data.get("leaseOwner")

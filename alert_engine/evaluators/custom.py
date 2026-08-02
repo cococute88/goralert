@@ -143,7 +143,13 @@ class CustomEvaluator:
     def evaluate(self, rule: AlertRule, condition: Condition, ctx: EvalContext) -> EvalResult:
         expression: Optional[str] = condition.expression
         if not expression or not expression.strip():
-            return EvalResult(False, None, detail="custom: empty expression")
+            return EvalResult(
+                False,
+                None,
+                detail="custom: empty expression",
+                status="evaluation_error",
+                failure_code="empty_custom_expression",
+            )
 
         names: Dict[str, Any] = {}
         if isinstance(condition.params, dict):
@@ -156,7 +162,13 @@ class CustomEvaluator:
         try:
             result = safe_eval(expression, names)
         except Exception as exc:  # noqa: BLE001
-            return EvalResult(False, None, detail=f"custom: eval error ({exc})")
+            return EvalResult(
+                False,
+                None,
+                detail=f"custom: eval error ({type(exc).__name__}: {exc})",
+                status="evaluation_error",
+                failure_code="custom_expression_error",
+            )
 
         triggered = bool(result)
         value = result if isinstance(result, (int, float)) else None

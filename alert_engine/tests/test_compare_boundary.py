@@ -84,3 +84,10 @@ def test_missing_inputs_never_raise():
     assert compare(1.0, None, 1.0) is False
     assert compare(1.0, "gte", None) is False
     assert compare(1.0, "unknown_op", 1.0) is False
+
+
+def test_non_finite_inputs_never_trigger_or_cross():
+    for invalid in (math.nan, math.inf, -math.inf):
+        assert compare(invalid, "gte", 1.0) is False
+        assert compare(1.0, "gte", invalid) is False
+        assert compare(2.0, "crossUp", 1.0, prev=invalid) is False

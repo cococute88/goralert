@@ -13,6 +13,7 @@ equality checks.
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 _EQ_ABS_TOL = 1e-9
@@ -36,6 +37,16 @@ def compare(
     """
     if value is None or comparator is None or threshold is None:
         return False
+    try:
+        value = float(value)
+        threshold = float(threshold)
+        prev = float(prev) if prev is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(value) or not math.isfinite(threshold):
+        return False
+    if prev is not None and not math.isfinite(prev):
+        return False
 
     if comparator == "gt":
         return value > threshold
@@ -46,7 +57,7 @@ def compare(
     if comparator == "lte":
         return value <= threshold
     if comparator == "eq":
-        return _almost_equal(float(value), float(threshold))
+        return _almost_equal(value, threshold)
     if comparator == "crossUp":
         if prev is None:
             return False

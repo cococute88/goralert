@@ -48,3 +48,6 @@ jobs:
 
       - name: Test scheduler and calendar UI contract
         run: npm run test:calendar-contract
+
+      - name: Test alert rule input contract
+        run: npm run test:alert-contract

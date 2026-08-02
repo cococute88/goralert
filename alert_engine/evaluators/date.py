@@ -22,6 +22,7 @@ from ..calendar_contract import (
     calendar_selector_match_types,
     normalize_calendar_event_type,
 )
+from ..data import DataResult
 from ..models import AlertRule, Condition
 from ..recurrence import get_tz
 from .base import EvalContext, EvalResult
@@ -87,7 +88,23 @@ class DateEvaluator:
 
         # Calendar-driven mode.
         if condition.selector is not None:
-            events = self._ds.get_calendar_events(ctx.uid, condition.selector)
+            result_method = getattr(self._ds, "get_calendar_events_result", None)
+            if callable(result_method):
+                data = result_method(ctx.uid, condition.selector)
+            else:
+                events = self._ds.get_calendar_events(ctx.uid, condition.selector)
+                data = DataResult.success(events)
+            if not data.ok:
+                status = data.status if data.status in {"no_data", "stale_data", "provider_error"} else "evaluation_error"
+                return EvalResult(
+                    False,
+                    None,
+                    detail=f"date calendar[{condition.selector.source}]: {data.detail or data.status}",
+                    status=status,
+                    failure_code=data.code or data.status,
+                    observed_at=data.observed_at,
+                )
+            events = data.value
             candidates = _notification_events(events, _selected_event_types(condition))
             todays = [event for event in candidates if event["notificationDate"] == today]
             triggered = len(todays) > 0
