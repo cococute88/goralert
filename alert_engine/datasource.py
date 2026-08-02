@@ -147,6 +147,8 @@ class AlertDataSource:
             code = "provider_rate_limit"
         elif any(token in name or token in message for token in ("auth", "unauthorized", "forbidden", "401", "403")):
             code = "provider_authentication_error"
+        elif "jsondecodeerror" in name or "expecting value" in message:
+            code = "provider_response_parse_error"
         else:
             code = "provider_error"
         return DataResult.failure(
@@ -154,6 +156,76 @@ class AlertDataSource:
             code,
             f"{action} failed ({type(exc).__name__})",
             provider="yfinance",
+        )
+
+    @staticmethod
+    def _download_error(yf, symbol: str) -> Optional[str]:
+        """Return yfinance's per-symbol error when download returned an empty frame."""
+        shared = getattr(yf, "shared", None)
+        if shared is None:
+            try:
+                from yfinance import shared  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - optional private diagnostic surface
+                return None
+        errors = getattr(shared, "_ERRORS", None)
+        if not isinstance(errors, dict):
+            return None
+        for key, value in errors.items():
+            if str(key).upper() == symbol.upper() and value:
+                return str(value)
+        return None
+
+    @staticmethod
+    def _select_close_payload(data, symbol: str):
+        """Select one Close/Adj Close series from flat or MultiIndex columns."""
+        import pandas as pd
+
+        for field in ("Close", "Adj Close"):
+            payload = None
+            if isinstance(data.columns, pd.MultiIndex):
+                exact = [
+                    column for column in data.columns
+                    if field in tuple(str(part) for part in column)
+                    and symbol in tuple(str(part).upper() for part in column)
+                ]
+                matches = exact or [
+                    column for column in data.columns
+                    if field in tuple(str(part) for part in column)
+                ]
+                if len(matches) == 1:
+                    payload = data.loc[:, matches[0]]
+                elif len(matches) > 1:
+                    return None, field, "ambiguous"
+            elif field in data.columns:
+                payload = data[field]
+            if payload is None:
+                continue
+            if isinstance(payload, pd.DataFrame):
+                if payload.shape[1] != 1:
+                    return None, field, "ambiguous"
+                payload = payload.iloc[:, 0]
+            return payload, field, None
+        return None, None, "missing"
+
+    def _download_history(self, yf, symbol: str, period: str):
+        """Fetch one symbol while preserving provider exceptions when supported."""
+        ticker_factory = getattr(yf, "Ticker", None)
+        if callable(ticker_factory):
+            return ticker_factory(symbol).history(
+                period=period,
+                interval="1d",
+                auto_adjust=False,
+                timeout=self._provider_timeout_seconds,
+                raise_errors=True,
+            )
+        # Test doubles and older extension seams may only expose download().
+        return yf.download(
+            symbol,
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=False,
+            timeout=self._provider_timeout_seconds,
         )
 
     @staticmethod
@@ -187,15 +259,26 @@ class AlertDataSource:
             logger.warning("market data status=%s code=%s symbol=%s", result.status, result.code, symbol)
             return result
         try:
-            data = yf.download(
-                symbol,
-                period=period or self._history_period,
-                interval="1d",
-                progress=False,
-                auto_adjust=False,
-                timeout=self._provider_timeout_seconds,
-            )
+            data = self._download_history(yf, symbol, period or self._history_period)
             if data is None or len(data) == 0:
+                download_error = self._download_error(yf, symbol)
+                if download_error:
+                    lowered = download_error.lower()
+                    if "jsondecodeerror" in lowered or "expecting value" in lowered:
+                        code = "provider_response_parse_error"
+                        detail = "provider returned no rows after a JSON response parse failure"
+                    else:
+                        code = "provider_download_error"
+                        detail = "provider returned no rows after a recorded download error"
+                    result = DataResult.failure(
+                        DATA_PROVIDER_ERROR,
+                        code,
+                        detail,
+                        provider="yfinance",
+                        metadata={"symbol": symbol},
+                    )
+                    self._close_cache[cache_key] = result
+                    return result
                 result = DataResult.failure(
                     DATA_NO_DATA,
                     "symbol_no_data",
@@ -204,29 +287,26 @@ class AlertDataSource:
                 )
                 self._close_cache[cache_key] = result
                 return result
-            if "Close" not in data:
+            close, price_field, payload_error = self._select_close_payload(data, symbol)
+            if payload_error == "missing":
                 result = DataResult.failure(
                     DATA_PROVIDER_ERROR,
                     "malformed_response",
-                    "provider response did not contain Close",
+                    "provider response did not contain Close or Adj Close",
                     provider="yfinance",
                 )
                 self._close_cache[cache_key] = result
                 return result
-            close = data["Close"]
-            # yfinance may return a single-column DataFrame for one symbol.
+            if payload_error == "ambiguous":
+                result = DataResult.failure(
+                    DATA_PROVIDER_ERROR,
+                    "malformed_response",
+                    f"provider returned an ambiguous {price_field} payload",
+                    provider="yfinance",
+                )
+                self._close_cache[cache_key] = result
+                return result
             import pandas as pd  # lazy import
-            if isinstance(close, pd.DataFrame):
-                if close.shape[1] != 1:
-                    result = DataResult.failure(
-                        DATA_PROVIDER_ERROR,
-                        "malformed_response",
-                        "provider returned an ambiguous Close payload",
-                        provider="yfinance",
-                    )
-                    self._close_cache[cache_key] = result
-                    return result
-                close = close.iloc[:, 0]
             close = pd.to_numeric(close, errors="coerce")
             close = close[~close.index.duplicated(keep="last")].sort_index().dropna()
             if len(close) == 0:
@@ -273,7 +353,7 @@ class AlertDataSource:
                     close,
                     observed_at=observed_at,
                     provider="yfinance",
-                    metadata={"interval": "1d", "symbol": symbol},
+                    metadata={"interval": "1d", "symbol": symbol, "priceField": price_field},
                 )
             self._close_cache[cache_key] = result
             return result

@@ -243,7 +243,7 @@ The engine + tests are complete; only real secrets/data are outstanding:
       engine merges both sources and de-duplicates tokens; until registration
       succeeds, push fails gracefully.
 - [ ] **Firestore indexes** — deploy the four required `notificationLogs` composites and
-      `alertRules.enabled` collection-group override from `firestore.indexes.json`
+      the `alertRules.enabled` and `testPushRequests.status` collection-group overrides from `firestore.indexes.json`
       with `firebase deploy --only firestore:indexes --project gorani-vercel`,
       then wait until every index is READY before enabling the worker.
 - [ ] Verify cron cadence in `.github/workflows/alert-engine.yml` (UTC; KST = UTC+9).

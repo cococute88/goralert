@@ -25,6 +25,7 @@ the run. ``globalEnabled=false`` for a user skips all of that user's rules.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import sys
 from collections import Counter, defaultdict
@@ -42,7 +43,7 @@ from .engine import (
     STATUS_PARTIAL_FAILURE,
     STATUS_PROVIDER_ERROR,
 )
-from .models import AlertRule, AlertSettings
+from .models import AlertRule
 
 logger = logging.getLogger("alert_engine.main")
 
@@ -52,6 +53,13 @@ JOB_SCOPE_KINDS: Dict[str, set] = {
     "calendar": {"date", "dividend"},
     "all": set(),  # empty -> no filtering
 }
+
+
+def _uid_tag(uid: Optional[str]) -> str:
+    """Stable correlation tag that never exposes a full Firebase UID."""
+    if not uid:
+        return "<all>"
+    return hashlib.sha256(uid.encode("utf-8")).hexdigest()[:12]
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -98,7 +106,7 @@ def run(argv: Optional[List[str]] = None) -> int:
     started = datetime.now(timezone.utc)
     logger.info(
         "engine start :: version=%s scope=%s uid=%s dry_run=%s tz=%s",
-        cfg.engine_version, args.job_scope, args.uid or "<all>", args.dry_run, cfg.default_tz,
+        cfg.engine_version, args.job_scope, _uid_tag(args.uid), args.dry_run, cfg.default_tz,
     )
 
     # Lazy import so --help works without firebase-admin installed.
@@ -117,7 +125,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         counts = test_push.process_test_requests(args.uid, dry_run=args.dry_run)
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         logger.info("engine done (test-push) :: %s elapsed=%.2fs", counts, elapsed)
-        return 0
+        return 1 if counts.get("error") else 0
 
     try:
         rules = firestore_client.list_enabled_rules(args.uid)
@@ -131,7 +139,6 @@ def run(argv: Optional[List[str]] = None) -> int:
     engine = AlertEngine(config=cfg, firestore=firestore_client)
 
     # Per-user settings cache + globalEnabled gate.
-    settings_cache: Dict[str, AlertSettings] = {}
     by_uid: Dict[str, List[AlertRule]] = defaultdict(list)
     for rule in rules:
         by_uid[rule.uid].append(rule)
@@ -144,12 +151,15 @@ def run(argv: Optional[List[str]] = None) -> int:
         try:
             settings = firestore_client.load_alert_settings(uid)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("settings load failed for uid=%s (%s); using defaults", uid, exc)
-            settings = AlertSettings()
-        settings_cache[uid] = settings
-
+            logger.error(
+                "settings load failed for uid=%s (%s); skipping %d rule(s)",
+                _uid_tag(uid), type(exc).__name__, len(uid_rules),
+            )
+            status_counts["settings_unavailable"] += len(uid_rules)
+            errors += 1
+            continue
         if not settings.globalEnabled:
-            logger.info("uid=%s globalEnabled=false -> skipping %d rule(s)", uid, len(uid_rules))
+            logger.info("uid=%s globalEnabled=false -> skipping %d rule(s)", _uid_tag(uid), len(uid_rules))
             status_counts["skipped_global_disabled"] += len(uid_rules)
             continue
 
@@ -176,13 +186,13 @@ def run(argv: Optional[List[str]] = None) -> int:
                     errors += 1
                 logger.info(
                     "alertId=%s ruleId=%s uid=%s occurrenceId=%s -> %s%s",
-                    rule.id, rule.id, uid, result.event_id or "<none>", result.status,
+                    rule.id, rule.id, _uid_tag(uid), result.event_id or "<none>", result.status,
                     f" ({result.detail})" if result.detail else "",
                 )
             except Exception as exc:  # noqa: BLE001 - isolation: never abort the run
                 errors += 1
                 status_counts[STATUS_ERROR] += 1
-                logger.exception("rule=%s uid=%s crashed: %s", rule.id, uid, exc)
+                logger.exception("rule=%s uid=%s crashed: %s", rule.id, _uid_tag(uid), exc)
 
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
     logger.info(

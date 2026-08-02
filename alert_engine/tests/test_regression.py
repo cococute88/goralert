@@ -12,8 +12,11 @@ REQ-048-adjacent (engine import surface stability). Guards against regressions i
 from __future__ import annotations
 
 import importlib
+import logging
 from datetime import datetime
+from types import SimpleNamespace
 
+from alert_engine.config import EngineConfig
 from alert_engine.event import make_event_id
 from alert_engine.models import AlertSettings, Recurrence, TriggerPolicy
 from alert_engine.recurrence import bucket_time, get_tz, next_occurrence
@@ -116,3 +119,101 @@ def test_global_enabled_allows_send():
     r = engine.process_rule(rule, now=_kst(2024, 5, 1, 12, 0), settings=settings)
     assert r.status == STATUS_DELIVERED
     assert len(fs.logs) == 1
+
+
+def test_global_enabled_false_survives_firestore_model_parsing():
+    assert AlertSettings.from_dict({"globalEnabled": False}).globalEnabled is False
+    assert AlertSettings.from_dict({"globalEnabled": True}).globalEnabled is True
+    assert AlertSettings.from_dict({}).globalEnabled is True
+
+
+def test_runner_skips_all_user_rules_when_settings_read_fails(monkeypatch):
+    from alert_engine import firestore_client, main
+
+    rule = make_ratio_rule()
+    processed = []
+
+    class NeverProcessEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_rule(self, *args, **kwargs):
+            processed.append((args, kwargs))
+            raise AssertionError("provider/evaluation boundary must not be reached")
+
+    monkeypatch.setattr(main, "load_config", lambda: EngineConfig(has_inline_service_account=True))
+    monkeypatch.setattr(main, "AlertEngine", NeverProcessEngine)
+    monkeypatch.setattr(firestore_client, "list_enabled_rules", lambda uid=None: [rule])
+    monkeypatch.setattr(
+        firestore_client,
+        "load_alert_settings",
+        lambda uid: (_ for _ in ()).throw(RuntimeError("settings unavailable")),
+    )
+
+    assert main.run([]) == 1
+    assert processed == []
+
+
+def test_runner_isolates_settings_failure_and_masks_full_uid(monkeypatch, caplog):
+    from alert_engine import firestore_client, main
+    from alert_engine.engine import STATUS_DISABLED
+
+    failed_uid = "firebase-uid-that-must-not-appear-in-logs"
+    healthy_uid = "healthy-user"
+    failed_rule = make_ratio_rule()
+    failed_rule.uid = failed_uid
+    healthy_rule = make_ratio_rule()
+    healthy_rule.uid = healthy_uid
+    processed = []
+
+    class RecordingEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_rule(self, rule, **kwargs):
+            processed.append(rule.uid)
+            return SimpleNamespace(
+                status=STATUS_DISABLED,
+                event_id=None,
+                detail="test",
+            )
+
+    def load_settings(uid):
+        if uid == failed_uid:
+            raise RuntimeError("settings unavailable")
+        return AlertSettings(globalEnabled=True)
+
+    monkeypatch.setattr(main, "load_config", lambda: EngineConfig(has_inline_service_account=True))
+    monkeypatch.setattr(main, "AlertEngine", RecordingEngine)
+    monkeypatch.setattr(firestore_client, "list_enabled_rules", lambda uid=None: [failed_rule, healthy_rule])
+    monkeypatch.setattr(firestore_client, "load_alert_settings", load_settings)
+
+    with caplog.at_level(logging.INFO):
+        assert main.run([]) == 1
+
+    assert processed == [healthy_uid]
+    assert failed_uid not in caplog.text
+
+
+def test_engine_direct_settings_failure_is_fail_closed():
+    class BrokenSettingsFirestore(FakeFirestore):
+        def load_alert_settings(self, uid):
+            raise RuntimeError("settings unavailable")
+
+    class NeverDataSource(FakeDataSource):
+        def get_ratio(self, numerator, denominator):
+            raise AssertionError("provider boundary must not be reached")
+
+    datasource = NeverDataSource(ratio=30.0)
+    firestore = BrokenSettingsFirestore()
+    channels = {"telegram": FakeChannel("telegram"), "push": FakeChannel("push")}
+    result = build_engine(datasource, firestore, channels).process_rule(
+        make_ratio_rule(), now=_kst(2024, 5, 1, 12, 0),
+    )
+
+    assert result.status == "error"
+    assert result.detail == "settings_unavailable"
+    assert channels["telegram"].calls == 0
+    assert channels["push"].calls == 0
+    assert firestore.logs == {}
+    assert firestore.state_updates == []

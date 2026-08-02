@@ -38,6 +38,12 @@ test("owner rules protect scheduler state and production history", {
   connectFirestoreEmulator(db, host, Number(port));
 
   try {
+    const settingsRef = doc(db, "users", uid, "alertSettings", "default");
+    await setDoc(settingsRef, { globalEnabled: false, updatedAt: serverTimestamp() });
+    assert.equal((await getDoc(settingsRef)).data().globalEnabled, false);
+    await updateDoc(settingsRef, { globalEnabled: true, updatedAt: serverTimestamp() });
+    assert.equal((await getDoc(settingsRef)).data().globalEnabled, true);
+
     const ruleRef = doc(db, "users", uid, "alertRules", "rule");
     const occurrenceRef = doc(db, "users", uid, "notificationLogs", "rule:2026-08-01T07:00:00+09:00");
     await setDoc(ruleRef, {

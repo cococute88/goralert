@@ -522,6 +522,8 @@ class AlertSettings:
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "AlertSettings":
         if not isinstance(data, dict):
             return cls()
+        raw_global_enabled = data.get("globalEnabled", True)
+        global_enabled = raw_global_enabled if isinstance(raw_global_enabled, bool) else True
         tokens = data.get("pushTokens")
         if isinstance(tokens, list):
             tokens = [t for t in tokens if isinstance(t, str) and t.strip()]
@@ -540,7 +542,7 @@ class AlertSettings:
                 seen_ids.add(device.id)
                 seen_device_tokens.add(device.token)
         return cls(
-            globalEnabled=bool(data.get("globalEnabled", True)),
+            globalEnabled=global_enabled,
             telegramChatId=_as_str(data.get("telegramChatId")),
             pushTokens=tokens,
             pushDevices=devices,

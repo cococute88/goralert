@@ -1028,7 +1028,8 @@ def list_pending_test_requests(uid: Optional[str] = None, limit: int = 50) -> Li
     Each returned dict includes ``id`` and ``uid`` alongside the stored fields
     (``channels``, ``message``, ``status`` …). When ``uid`` is given the query
     is scoped to that user; otherwise a collection_group scan spans all users
-    (falling back to an unfiltered scan if the status index is not deployed).
+    and requires the collection-group ``status`` field override declared in
+    ``firestore.indexes.json``.
     """
     from google.cloud.firestore_v1 import FieldFilter  # lazy import
 
@@ -1049,16 +1050,12 @@ def list_pending_test_requests(uid: Optional[str] = None, limit: int = 50) -> Li
         except Exception as exc:  # noqa: BLE001
             if not _is_missing_index_error(exc):
                 raise
-            logger.warning(
-                "collection-group index for testPushRequests.status is missing (%s); "
-                "falling back to an unfiltered scan + in-memory filter.",
-                exc,
-            )
-            snaps = list(db.collection_group(TEST_PUSH_REQUESTS).stream())
+            raise RuntimeError(
+                "testPushRequests.status collection-group index is required; "
+                "deploy the field override in firestore.indexes.json"
+            ) from exc
         for snap in snaps:
             data = snap.to_dict() or {}
-            if data.get("status") != "pending":
-                continue
             out.append({"id": snap.id, "uid": _extract_uid_from_path(snap), **data})
 
     # Oldest first so requests are handled roughly in order.

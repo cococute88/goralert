@@ -26,6 +26,7 @@ the message; the rule is never persisted and rule state is never touched.
 from __future__ import annotations
 
 import logging
+import hashlib
 from typing import Any, Dict, List, Optional
 
 from .config import load_config
@@ -35,6 +36,12 @@ from .models import AlertRule, AlertSettings
 logger = logging.getLogger("alert_engine.test_push")
 
 VALID_CHANNELS = ("push", "telegram")
+
+
+def _uid_tag(uid: Optional[str]) -> str:
+    if not uid:
+        return "<all>"
+    return hashlib.sha256(uid.encode("utf-8")).hexdigest()[:12]
 
 
 def build_test_rule(uid: str, settings: AlertSettings, channels: List[str]) -> AlertRule:
@@ -87,7 +94,7 @@ def process_test_requests(
     engine = engine or AlertEngine(config=load_config(), firestore=firestore)
 
     requests = firestore.list_pending_test_requests(uid, limit=limit)
-    logger.info("[test-push] draining %d pending request(s) (uid=%s)", len(requests), uid or "<all>")
+    logger.info("[test-push] draining %d pending request(s) (uid=%s)", len(requests), _uid_tag(uid))
 
     counts = {"processed": 0, "sent": 0, "failed": 0, "error": 0}
     for req in requests:
@@ -98,11 +105,18 @@ def process_test_requests(
             continue
 
         channels = _normalize_channels(req.get("channels"))
-        logger.info("[test-push] request=%s uid=%s channels=%s", req_id, req_uid, channels)
+        logger.info("[test-push] request=%s uid=%s channels=%s", req_id, _uid_tag(req_uid), channels)
         counts["processed"] += 1
 
         try:
             settings = firestore.load_alert_settings(req_uid)
+            if not settings.globalEnabled:
+                firestore.mark_test_request(
+                    req_uid, req_id, "failed", error="global alerts are disabled",
+                )
+                counts["failed"] += 1
+                logger.info("[test-push] request=%s -> global alerts disabled", req_id)
+                continue
             # A caller-supplied message overrides the settings defaults.
             msg = req.get("message") if isinstance(req.get("message"), dict) else None
             if msg and (msg.get("title") or msg.get("body")):
