@@ -154,6 +154,9 @@ class FakeFirestore:
         self.calendar_writes = 0
         self.rule_exists = True
         self.rule_enabled = True
+        self.legacy_cursor = None
+        self.legacy_initializations = 0
+        self.scheduler_errors: List[Dict[str, Any]] = []
         self._settings = settings or AlertSettings(
             globalEnabled=True, telegramChatId="chat-123", pushTokens=["tok-1"]
         )
@@ -195,6 +198,49 @@ class FakeFirestore:
         if value is None:
             return None
         return value if isinstance(value, dict) else vars(value)
+
+    def initialize_legacy_scheduler_cursor(
+        self, uid, rule_id, expected_trigger, expected_schedule_changed_at,
+        next_scheduled_at, migration_cutoff,
+    ):
+        with self._lock:
+            if not self.rule_exists or not self.rule_enabled:
+                return {
+                    "initialization": "inactive",
+                    "reason": "rule_deleted" if not self.rule_exists else "rule_disabled",
+                }
+            if self.legacy_cursor is not None:
+                return {
+                    "initialization": "already_initialized",
+                    "nextScheduledAt": self.legacy_cursor,
+                }
+            self.legacy_cursor = next_scheduled_at
+            self.legacy_initializations += 1
+            self.state_updates.append({
+                "rule_id": rule_id,
+                "next_scheduled_at": next_scheduled_at,
+                "durable_scheduler_version": 1,
+                "scheduler_migration": {
+                    "kind": "legacy_cursor_bootstrap",
+                    "backlogPolicy": "skip_automatic_backlog",
+                    "backlogSkippedThrough": migration_cutoff,
+                    "initializedNextScheduledAt": next_scheduled_at,
+                },
+                "schedule_status": "legacy_cursor_initialized",
+            })
+            return {
+                "initialization": "initialized",
+                "nextScheduledAt": next_scheduled_at,
+            }
+
+    def record_scheduler_error(self, uid, rule_id, code, detail, detected_at):
+        self.scheduler_errors.append({
+            "rule_id": rule_id,
+            "code": code,
+            "detail": detail,
+            "detected_at": detected_at,
+        })
+        return self.rule_exists
 
     def claim_occurrence(
         self, uid, rule_id, event_id, payload, next_scheduled_at, worker_id, now,
@@ -396,6 +442,8 @@ def make_calendar_date_rule(rule_id: str = "rule-cal", mark_filter: Optional[Lis
         },
         "trigger": {"mode": "recurring", "recurrence": {"kind": "calendar"}},
         "delivery": {"channels": ["telegram"], "message": {"title": "cal", "body": "{ticker}"}},
+        "durableSchedulerVersion": 1,
+        "nextScheduledAt": datetime(2024, 5, 1, 0, 0, tzinfo=timezone.utc),
     })
 
 

@@ -51,6 +51,7 @@ from .recurrence import (
     as_utc,
     bucket_time,
     due_occurrence,
+    first_future_scheduled_occurrence,
     get_tz,
     next_scheduled_occurrence,
     parse_datetime,
@@ -82,6 +83,7 @@ STATUS_DUPLICATE = "skipped_duplicate"
 STATUS_DELIVERED = "delivered"
 STATUS_DRY_RUN = "dry_run"
 STATUS_ERROR = "error"
+STATUS_LEGACY_CURSOR_INITIALIZED = "legacy_cursor_initialized"
 
 
 def _within_quiet_hours(quiet, now: datetime) -> bool:
@@ -332,6 +334,118 @@ class AlertEngine:
         assert recurrence is not None
         timezone_name = recurrence.tz or self.config.default_tz
 
+        # A pre-version rule with no cursor is a legacy row. Its first durable
+        # worker run is migration-only: atomically persist the first occurrence
+        # strictly after the cutover instant, then return before evaluation,
+        # history creation, occurrence claim, or any provider boundary.
+        if rule.nextScheduledAt is None:
+            is_legacy = (
+                rule.durableSchedulerVersion is None
+                and rule.schedulerMigration is None
+                and rule.schedulerRecovery is None
+                and rule.scheduleStatus != "recovery_requested"
+            )
+            if not is_legacy:
+                detail = (
+                    "durable scheduler data is corrupt: version or scheduler metadata "
+                    "exists but nextScheduledAt is missing"
+                )
+                logger.error(
+                    "scheduler corruption alertId=%s ruleId=%s code=missing_cursor_for_versioned_rule "
+                    "schedulerVersion=%s workerAt=%s",
+                    rule.id, rule.id, rule.durableSchedulerVersion, as_utc(now).isoformat(),
+                )
+                if not dry_run:
+                    try:
+                        self.firestore.record_scheduler_error(
+                            rule.uid, rule.id, "missing_cursor_for_versioned_rule",
+                            detail, as_utc(now),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("scheduler error persistence failed ruleId=%s", rule.id)
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, detail)
+
+            try:
+                future_cursor = first_future_scheduled_occurrence(recurrence, now)
+                if future_cursor is None:
+                    raise ValueError("recurrence has no future scheduled occurrence")
+            except Exception as exc:  # invalid timezone/schedule
+                detail = f"legacy cursor initialization failed: {exc}"
+                logger.exception(
+                    "legacy cursor resolution failed alertId=%s ruleId=%s timezone=%s workerAt=%s",
+                    rule.id, rule.id, timezone_name, as_utc(now).isoformat(),
+                )
+                if not dry_run:
+                    try:
+                        self.firestore.record_scheduler_error(
+                            rule.uid, rule.id, "invalid_schedule_or_timezone",
+                            detail, as_utc(now),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("scheduler error persistence failed ruleId=%s", rule.id)
+                return ProcessResult(rule.id, rule.uid, STATUS_ERROR, detail)
+
+            future_utc = as_utc(future_cursor)
+            if dry_run:
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_DRY_RUN,
+                    f"legacy cursor would initialize at {future_utc.isoformat()}; backlog would not be delivered",
+                )
+            try:
+                initialized = self.firestore.initialize_legacy_scheduler_cursor(
+                    rule.uid,
+                    rule.id,
+                    trigger.to_dict(),
+                    rule.scheduleChangedAt,
+                    future_utc,
+                    as_utc(now),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("legacy cursor transaction failed ruleId=%s", rule.id)
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_ERROR,
+                    f"legacy cursor initialization transaction failed: {exc}",
+                )
+            initialization = initialized.get("initialization")
+            if initialization == "inactive":
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_DISABLED,
+                    initialized.get("reason") or "rule inactive during legacy cursor initialization",
+                )
+            if initialization == "schedule_changed":
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_NOT_DUE,
+                    "schedule changed during legacy cursor initialization",
+                )
+            if initialization == "corrupt_durable_scheduler":
+                try:
+                    self.firestore.record_scheduler_error(
+                        rule.uid, rule.id, "missing_cursor_for_versioned_rule",
+                        "durable scheduler metadata appeared without a cursor during initialization",
+                        as_utc(now),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("scheduler error persistence failed ruleId=%s", rule.id)
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_ERROR,
+                    "durable scheduler metadata appeared without a cursor during initialization",
+                )
+            if initialization not in {"initialized", "already_initialized"}:
+                return ProcessResult(
+                    rule.id, rule.uid, STATUS_ERROR,
+                    f"unexpected legacy cursor initialization result: {initialization}",
+                )
+            stored_cursor = initialized.get("nextScheduledAt") or future_utc
+            logger.info(
+                "legacy cursor initialization alertId=%s ruleId=%s result=%s "
+                "backlogPolicy=skip_automatic_backlog cutoff=%s nextScheduledAt=%s",
+                rule.id, rule.id, initialization, as_utc(now).isoformat(), stored_cursor,
+            )
+            return ProcessResult(
+                rule.id, rule.uid, STATUS_LEGACY_CURSOR_INITIALIZED,
+                f"backlog not delivered; nextScheduledAt={stored_cursor}",
+            )
+
         resume_record = None
         resume_event_id = None
         if rule.scheduleStatus == "processing" and rule.lastOccurrenceId:
@@ -361,28 +475,6 @@ class AlertEngine:
                     "terminal occurrence already recorded", event_id=rule.lastOccurrenceId,
                 )
 
-        # Legacy rules have no cursor. Reconstruct their first unprocessed
-        # occurrence from durable history fields, never from a sliding window.
-        anchor = rule.createdAt
-        schedule_changed = parse_datetime(rule.scheduleChangedAt, timezone_name)
-        last_processed = parse_datetime(rule.lastProcessedScheduledAt, timezone_name)
-        if schedule_changed is not None:
-            # The browser transaction records cancellation of the prior cursor
-            # and removes it. Start the edited schedule at/after the edit commit,
-            # never by replaying the new cadence from the rule's creation date.
-            anchor = schedule_changed
-        elif last_processed is not None:
-            anchor = last_processed + timedelta(microseconds=1)
-        elif rule.lastTriggeredAt:
-            last_triggered = parse_datetime(rule.lastTriggeredAt, timezone_name)
-            if last_triggered is not None:
-                anchor = last_triggered + timedelta(microseconds=1)
-        if anchor is None:
-            # Only malformed legacy documents lack every durable anchor. Keep a
-            # bounded compatibility inference for those rows; normal rules use
-            # createdAt or the canonical cursor and never expire by this window.
-            anchor = now - timedelta(minutes=self.config.eval_window_minutes)
-
         try:
             scheduled_for = (
                 parse_datetime(resume_record.get("scheduledFor"), timezone_name)
@@ -391,7 +483,6 @@ class AlertEngine:
                     recurrence,
                     now,
                     next_scheduled_at=rule.nextScheduledAt,
-                    anchor=anchor,
                 )
             )
         except Exception as exc:  # invalid timezone/schedule

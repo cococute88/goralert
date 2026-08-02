@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
-import { serverTimestamp } from "firebase/firestore";
+import { serverTimestamp, Timestamp } from "firebase/firestore";
 import { sanitizeFirestorePayload } from "../lib/alerts/firestore-payload.mjs";
 
 test("removes undefined recursively while preserving valid primitive values", () => {
@@ -37,4 +38,33 @@ test("preserves Firestore FieldValue and prototype-bearing special values by ide
   assert.equal(payload.nested.timestamp, timestamp);
   assert.equal(payload.date, date);
   assert.equal(payload.special, special);
+});
+
+test("preserves the UTC Firestore Timestamp used by the durable cursor contract", () => {
+  const instant = new Date("2026-08-31T03:15:00.000Z");
+  const cursor = Timestamp.fromDate(instant);
+
+  const payload = sanitizeFirestorePayload({
+    durableSchedulerVersion: 1,
+    nextScheduledAt: cursor,
+  });
+
+  assert.equal(payload.durableSchedulerVersion, 1);
+  assert.equal(payload.nextScheduledAt, cursor);
+  assert.equal(payload.nextScheduledAt.toDate().toISOString(), instant.toISOString());
+});
+
+test("Firestore index manifest contains only deployable query indexes", () => {
+  const manifest = JSON.parse(fs.readFileSync("firestore.indexes.json", "utf8"));
+
+  assert.equal(manifest.indexes.length, 4);
+  assert.ok(manifest.indexes.every((index) => index.fields.length >= 2));
+  assert.deepEqual(manifest.fieldOverrides, [{
+    collectionGroup: "alertRules",
+    fieldPath: "enabled",
+    indexes: [
+      { queryScope: "COLLECTION", order: "ASCENDING" },
+      { queryScope: "COLLECTION_GROUP", order: "ASCENDING" },
+    ],
+  }]);
 });

@@ -374,6 +374,12 @@ class AlertRule:
     lastValue: Optional[Union[float, str]] = None
     ruleVersion: Optional[int] = None
     engineVersion: Optional[str] = None
+    # Schema version for the durable occurrence scheduler. Versioned rules
+    # without a cursor are corrupt; only pre-version legacy rows are migrated.
+    durableSchedulerVersion: Optional[int] = None
+    schedulerMigration: Optional[Dict[str, Any]] = None
+    schedulerRecovery: Optional[Dict[str, Any]] = None
+    schedulerError: Optional[Dict[str, Any]] = None
     # Canonical scheduler cursor. Firestore stores this as a timezone-aware
     # timestamp (UTC internally); legacy rules may omit it and are backfilled
     # from createdAt/lastTriggeredAt by the engine.
@@ -409,6 +415,26 @@ class AlertRule:
             lastValue=last_value,
             ruleVersion=rule_version,
             engineVersion=_as_str(data.get("engineVersion")),
+            durableSchedulerVersion=(
+                int(data["durableSchedulerVersion"])
+                if isinstance(data.get("durableSchedulerVersion"), (int, float))
+                else None
+            ),
+            schedulerMigration=(
+                dict(data["schedulerMigration"])
+                if isinstance(data.get("schedulerMigration"), dict)
+                else None
+            ),
+            schedulerRecovery=(
+                dict(data["schedulerRecovery"])
+                if isinstance(data.get("schedulerRecovery"), dict)
+                else None
+            ),
+            schedulerError=(
+                dict(data["schedulerError"])
+                if isinstance(data.get("schedulerError"), dict)
+                else None
+            ),
             nextScheduledAt=data.get("nextScheduledAt"),
             lastProcessedScheduledAt=data.get("lastProcessedScheduledAt"),
             lastOccurrenceId=_as_str(data.get("lastOccurrenceId")),
@@ -432,6 +458,10 @@ class AlertRule:
             "lastValue": self.lastValue,
             "ruleVersion": self.ruleVersion,
             "engineVersion": self.engineVersion,
+            "durableSchedulerVersion": self.durableSchedulerVersion,
+            "schedulerMigration": self.schedulerMigration,
+            "schedulerRecovery": self.schedulerRecovery,
+            "schedulerError": self.schedulerError,
             "nextScheduledAt": self.nextScheduledAt,
             "lastProcessedScheduledAt": self.lastProcessedScheduledAt,
             "lastOccurrenceId": self.lastOccurrenceId,

@@ -11,17 +11,22 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
 
 from .event import make_event_id
-from .firestore_client import ALERT_RULES, NOTIFICATION_LOGS, get_db
+from .firestore_client import (
+    ALERT_RULES,
+    DURABLE_SCHEDULER_VERSION,
+    LEGACY_BACKLOG_POLICY,
+    NOTIFICATION_LOGS,
+    get_db,
+)
 from .models import AlertRule
 from .recurrence import (
     as_utc,
-    due_occurrence,
+    first_future_scheduled_occurrence,
     get_tz,
-    next_scheduled_occurrence,
     parse_datetime,
     scheduled_occurrence,
 )
@@ -64,53 +69,105 @@ def _rule_rows(uid: Optional[str]) -> Iterable[tuple[str, AlertRule]]:
             yield row_uid, rule
 
 
-def _legacy_anchor(rule: AlertRule, timezone_name: str) -> Any:
-    last_processed = parse_datetime(rule.lastProcessedScheduledAt, timezone_name)
-    if last_processed:
-        return last_processed + timedelta(microseconds=1)
-    last_triggered = parse_datetime(rule.lastTriggeredAt, timezone_name)
-    if last_triggered:
-        return last_triggered + timedelta(microseconds=1)
-    return rule.createdAt
-
-
-def _previous_occurrence(rule: AlertRule, cursor: datetime) -> Optional[datetime]:
-    recurrence = rule.trigger.recurrence
-    if recurrence is None:
-        return None
-    lookback_days = {
-        "calendar": 2,
-        "weekly": 8,
-        "biweekly": 15,
-        "monthlyFirstDay": 40,
-        "monthlyLastDay": 40,
-    }.get(recurrence.kind, 400)
-    candidate = scheduled_occurrence(recurrence, cursor - timedelta(days=lookback_days))
-    previous = None
-    for _ in range(400):
-        if candidate is None or candidate >= cursor:
-            return previous
-        previous = candidate
-        candidate = next_scheduled_occurrence(recurrence, candidate)
-    return previous
-
-
 def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, Any]]:
     recurrence = rule.trigger.recurrence
     if recurrence is None:
         return None
     timezone_name = recurrence.tz or "Asia/Seoul"
     cursor = parse_datetime(rule.nextScheduledAt, timezone_name)
-    if cursor is None:
-        candidate = due_occurrence(
-            recurrence,
-            now,
-            anchor=_legacy_anchor(rule, timezone_name),
+    migration = rule.schedulerMigration if isinstance(rule.schedulerMigration, dict) else None
+    recovery = rule.schedulerRecovery if isinstance(rule.schedulerRecovery, dict) else None
+    base = {
+        "uid": uid,
+        "ruleId": rule.id,
+        "ruleName": rule.name,
+        "enabled": rule.enabled,
+        "timezone": timezone_name,
+        "durableSchedulerVersion": rule.durableSchedulerVersion,
+    }
+
+    if rule.nextScheduledAt is None:
+        is_legacy = (
+            rule.durableSchedulerVersion is None
+            and migration is None
+            and recovery is None
+            and rule.scheduleStatus != "recovery_requested"
         )
-    else:
-        candidate = cursor if cursor <= now.astimezone(cursor.tzinfo) else _previous_occurrence(rule, cursor)
-    if candidate is None or candidate > now.astimezone(candidate.tzinfo):
-        return None
+        if is_legacy:
+            future = first_future_scheduled_occurrence(recurrence, now)
+            return {
+                **base,
+                "classification": "legacy_cursor_uninitialized",
+                "backlogPolicy": LEGACY_BACKLOG_POLICY,
+                "backlogAutomaticDelivery": "will_be_skipped",
+                "proposedNextFutureOccurrence": as_utc(future).isoformat() if future else None,
+            }
+        return {
+            **base,
+            "classification": "corrupt_durable_scheduler",
+            "scheduleStatus": rule.scheduleStatus,
+            "error": "durable scheduler version or metadata exists but nextScheduledAt is missing",
+        }
+
+    if cursor is None:
+        return {
+            **base,
+            "classification": "corrupt_durable_scheduler",
+            "scheduleStatus": rule.scheduleStatus,
+            "error": "nextScheduledAt is present but is not a valid timestamp",
+        }
+
+    cursor_utc = as_utc(cursor).isoformat()
+    migration_fields: Dict[str, Any] = {}
+    if migration is not None:
+        migration_fields = {
+            "migrationKind": migration.get("kind"),
+            "migrationPerformedAt": (
+                as_utc(parsed).isoformat()
+                if (parsed := parse_datetime(migration.get("migratedAt"), "UTC"))
+                else None
+            ),
+            "backlogPolicy": migration.get("backlogPolicy"),
+            "backlogAutomaticDelivery": (
+                "skipped" if migration.get("backlogPolicy") == LEGACY_BACKLOG_POLICY else "unknown"
+            ),
+            "backlogSkippedThrough": (
+                as_utc(parsed).isoformat()
+                if (parsed := parse_datetime(migration.get("backlogSkippedThrough"), "UTC"))
+                else None
+            ),
+            "initializedNextScheduledAt": (
+                as_utc(parsed).isoformat()
+                if (parsed := parse_datetime(migration.get("initializedNextScheduledAt"), "UTC"))
+                else None
+            ),
+        }
+
+    if recovery is not None and recovery.get("status") in {"requested", "processing"}:
+        requested = parse_datetime(recovery.get("scheduledFor"), timezone_name)
+        return {
+            **base,
+            **migration_fields,
+            "classification": "explicit_recovery_requested",
+            "scheduleStatus": rule.scheduleStatus,
+            "recoveryStatus": recovery.get("status"),
+            "recoveryOccurrenceId": recovery.get("occurrenceId"),
+            "scheduledFor": as_utc(requested).isoformat() if requested else None,
+            "nextScheduledAt": cursor_utc,
+        }
+
+    if cursor > now.astimezone(cursor.tzinfo):
+        return {
+            **base,
+            **migration_fields,
+            "classification": (
+                "legacy_cursor_initialized" if migration is not None else "durable_rule_healthy"
+            ),
+            "scheduleStatus": rule.scheduleStatus,
+            "nextFutureOccurrence": cursor_utc,
+        }
+
+    candidate = cursor
 
     event_id = make_event_id(rule.id, candidate.isoformat())
     db = get_db()
@@ -118,13 +175,11 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
     if snap.exists:
         data = snap.to_dict() or {}
         return {
-            "uid": uid,
-            "ruleId": rule.id,
-            "ruleName": rule.name,
+            **base,
+            **migration_fields,
             "occurrenceId": event_id,
             "scheduledFor": as_utc(candidate).isoformat(),
-            "timezone": timezone_name,
-            "classification": "recorded",
+            "classification": "recorded_occurrence",
             "status": data.get("status") or ("processing" if data.get("pending") else "legacy"),
             "channelStatuses": [
                 {"channel": item.get("channel"), "status": item.get("status")}
@@ -132,15 +187,12 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
             ],
         }
     return {
-        "uid": uid,
-        "ruleId": rule.id,
-        "ruleName": rule.name,
+        **base,
+        **migration_fields,
         "occurrenceId": event_id,
         "scheduledFor": as_utc(candidate).isoformat(),
-        "timezone": timezone_name,
-        "classification": "missing_occurrence_record",
-        "enabled": rule.enabled,
-        "nextScheduledAt": as_utc(cursor).isoformat() if cursor else None,
+        "classification": "overdue_cursor",
+        "nextScheduledAt": cursor_utc,
         "risk": "delivery may have occurred outside Firestore; verify provider logs before recovery",
     }
 
@@ -151,6 +203,7 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
     from firebase_admin import firestore
 
     db = get_db()
+    requested_at = datetime.now(timezone.utc)
     rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
     transaction = db.transaction()
 
@@ -166,6 +219,8 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
         if not rule.enabled:
             raise RuntimeError("refusing recovery: rule is disabled")
         parsed = _parse_recovery_occurrence(rule, scheduled_for)
+        if as_utc(parsed) >= requested_at:
+            raise RuntimeError("refusing recovery: scheduled occurrence is not in the past")
         occurrence_id = make_event_id(rule_id, parsed.isoformat())
         log_col = db.collection("users").document(uid).collection(NOTIFICATION_LOGS)
         log_ref = log_col.document(occurrence_id)
@@ -187,7 +242,18 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
             raise RuntimeError("refusing recovery: rule has an occurrence in processing")
         transaction.set(rule_ref, {
             "nextScheduledAt": as_utc(parsed),
+            "durableSchedulerVersion": DURABLE_SCHEDULER_VERSION,
             "scheduleStatus": "recovery_requested",
+            "schedulerRecovery": {
+                "status": "requested",
+                "requestedAt": firestore.SERVER_TIMESTAMP,
+                "scheduledFor": as_utc(parsed),
+                "occurrenceId": occurrence_id,
+                "duplicateRiskAcknowledged": True,
+                "requestedBy": "operator_audit",
+                "previousNextScheduledAt": as_utc(current) if current else None,
+            },
+            "schedulerError": firestore.DELETE_FIELD,
             "updatedAt": firestore.SERVER_TIMESTAMP,
         }, merge=True)
         return parsed, occurrence_id

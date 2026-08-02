@@ -79,6 +79,8 @@ def _rule(
             "channels": ["push", "telegram"],
             "message": {"title": "일정", "body": "{ticker} 일정"},
         },
+        "durableSchedulerVersion": 1,
+        "nextScheduledAt": datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc),
     })
 
 
@@ -89,6 +91,7 @@ def _dividend_rule(event_type: str = "ex_div") -> AlertRule:
     rule.condition.kind = "dividend"
     rule.condition.ticker = "TEST"
     rule.trigger.recurrence.time = "08:00"
+    rule.nextScheduledAt = datetime(2026, 8, 9, 23, 0, tzinfo=timezone.utc)
     return rule
 
 
@@ -109,6 +112,7 @@ def _nested_composite_rule() -> AlertRule:
         ],
     )
     rule.trigger.recurrence.time = "23:45"
+    rule.nextScheduledAt = datetime(2026, 8, 10, 14, 45, tzinfo=timezone.utc)
     return rule
 
 
@@ -345,6 +349,7 @@ def test_late_calendar_event_triggers_at_midnight_cron_without_changing_event_da
     engine = build_engine(datasource, firestore, {"push": push, "telegram": telegram})
     rule = _rule()
     rule.trigger.recurrence.time = "23:45"
+    rule.nextScheduledAt = datetime(2026, 8, 10, 14, 45, tzinfo=timezone.utc)
 
     result = engine.process_rule(
         rule,

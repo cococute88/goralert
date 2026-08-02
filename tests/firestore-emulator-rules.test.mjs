@@ -44,6 +44,8 @@ test("owner rules protect scheduler state and production history", {
       uid,
       enabled: true,
       trigger: { mode: "recurring", recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" } },
+      durableSchedulerVersion: 1,
+      nextScheduledAt: new Date("2099-08-31T22:00:00Z"),
     });
     assert.equal((await getDoc(ruleRef)).data().enabled, true);
     await updateDoc(ruleRef, { enabled: false });
@@ -51,6 +53,46 @@ test("owner rules protect scheduler state and production history", {
       () => updateDoc(ruleRef, {
         nextScheduledAt: new Date("2026-07-31T22:00:00Z"),
         scheduleStatus: "processing",
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      () => updateDoc(ruleRef, {
+        schedulerMigration: {
+          kind: "legacy_cursor_bootstrap",
+          backlogPolicy: "skip_automatic_backlog",
+        },
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      () => updateDoc(ruleRef, { durableSchedulerVersion: 999 }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      () => updateDoc(ruleRef, {
+        durableSchedulerVersion: 1,
+        nextScheduledAt: new Date("2099-09-30T22:00:00Z"),
+        scheduleStatus: "schedule_changed",
+        scheduleChangedAt: serverTimestamp(),
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+    await assert.rejects(
+      () => updateDoc(ruleRef, {
+        schedulerRecovery: {
+          status: "requested",
+          duplicateRiskAcknowledged: true,
+        },
+      }),
+      (error) => error?.code === "permission-denied",
+    );
+    const invalidNewRuleRef = doc(db, "users", uid, "alertRules", "invalid-new-rule");
+    await assert.rejects(
+      () => setDoc(invalidNewRuleRef, {
+        uid,
+        enabled: true,
+        trigger: { mode: "recurring", recurrence: { kind: "weekly", weekday: 1 } },
       }),
       (error) => error?.code === "permission-denied",
     );
@@ -80,6 +122,8 @@ test("owner rules protect scheduler state and production history", {
       transaction.update(ruleRef, {
         enabled: true,
         trigger: { mode: "recurring", recurrence: { kind: "monthlyLastDay", time: "12:15", tz: "Asia/Seoul" } },
+        durableSchedulerVersion: 1,
+        nextScheduledAt: new Date("2099-08-31T03:15:00Z"),
         scheduleStatus: "schedule_changed",
         scheduleChangedAt: serverTimestamp(),
       });

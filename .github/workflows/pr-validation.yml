@@ -45,3 +45,6 @@ jobs:
 
       - name: Test Firestore payload sanitizer
         run: npm run test:firestore-payload
+
+      - name: Test scheduler and calendar UI contract
+        run: npm run test:calendar-contract

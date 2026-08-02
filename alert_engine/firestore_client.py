@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -372,6 +373,141 @@ TERMINAL_OCCURRENCE_STATUSES = {
     "disabled", "delivery_unknown",
 }
 
+DURABLE_SCHEDULER_VERSION = 1
+LEGACY_BACKLOG_POLICY = "skip_automatic_backlog"
+
+
+def initialize_legacy_scheduler_cursor(
+    uid: str,
+    rule_id: str,
+    expected_trigger: Dict[str, Any],
+    expected_schedule_changed_at: Any,
+    next_scheduled_at: datetime,
+    migration_cutoff: datetime,
+) -> Dict[str, Any]:
+    """Atomically bootstrap one pre-durable rule at its first future cursor.
+
+    No occurrence/history document is created. Transaction retries re-read the
+    complete rule and converge on the winning cursor without resurrecting a
+    deleted rule or overwriting a concurrent schedule edit/recovery request.
+    """
+    from firebase_admin import firestore
+
+    db = get_db()
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+    future_utc = next_scheduled_at.astimezone(timezone.utc)
+    cutoff_utc = migration_cutoff.astimezone(timezone.utc)
+
+    @firestore.transactional
+    def initialize(transaction):
+        snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            return {"initialization": "inactive", "reason": "rule_deleted"}
+        data = snap.to_dict() or {}
+        if data.get("enabled") is not True:
+            return {"initialization": "inactive", "reason": "rule_disabled"}
+        if (
+            data.get("trigger") != expected_trigger
+            or not _same_persisted_instant(
+                data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            )
+        ):
+            return {"initialization": "schedule_changed"}
+        current_cursor = data.get("nextScheduledAt")
+        if current_cursor is not None:
+            return {
+                "initialization": "already_initialized",
+                "nextScheduledAt": current_cursor,
+                "scheduleStatus": data.get("scheduleStatus"),
+            }
+        if data.get("durableSchedulerVersion") is not None or data.get("schedulerMigration") is not None:
+            return {"initialization": "corrupt_durable_scheduler"}
+
+        migration = {
+            "kind": "legacy_cursor_bootstrap",
+            "migratedAt": firestore.SERVER_TIMESTAMP,
+            "backlogPolicy": LEGACY_BACKLOG_POLICY,
+            "backlogSkippedThrough": cutoff_utc,
+            "initializedNextScheduledAt": future_utc,
+        }
+        transaction.update(rule_ref, {
+            "nextScheduledAt": future_utc,
+            "durableSchedulerVersion": DURABLE_SCHEDULER_VERSION,
+            "schedulerMigration": migration,
+            "scheduleStatus": "legacy_cursor_initialized",
+            "schedulerError": firestore.DELETE_FIELD,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        })
+        return {
+            "initialization": "initialized",
+            "nextScheduledAt": future_utc,
+            "migration": migration,
+        }
+
+    for contention_attempt in range(3):
+        try:
+            return initialize(db.transaction())
+        except Exception as exc:  # noqa: BLE001
+            if "Failed to commit transaction" not in str(exc):
+                raise
+            reconciled = rule_ref.get()
+            if not reconciled.exists:
+                return {"initialization": "inactive", "reason": "rule_deleted"}
+            data = reconciled.to_dict() or {}
+            if data.get("enabled") is not True:
+                return {"initialization": "inactive", "reason": "rule_disabled"}
+            if data.get("trigger") != expected_trigger or not _same_persisted_instant(
+                data.get("scheduleChangedAt"), expected_schedule_changed_at,
+            ):
+                return {"initialization": "schedule_changed"}
+            if data.get("nextScheduledAt") is not None:
+                return {
+                    "initialization": "already_initialized",
+                    "nextScheduledAt": data.get("nextScheduledAt"),
+                    "scheduleStatus": data.get("scheduleStatus"),
+                    "reconciledAfterContention": True,
+                }
+            if data.get("durableSchedulerVersion") is not None or data.get("schedulerMigration") is not None:
+                return {"initialization": "corrupt_durable_scheduler"}
+            if contention_attempt == 2:
+                raise
+            stagger = (threading.get_ident() % 13) / 100
+            time.sleep(0.05 * (contention_attempt + 1) + stagger)
+
+    raise RuntimeError("unreachable legacy initialization state")
+
+
+def record_scheduler_error(
+    uid: str,
+    rule_id: str,
+    code: str,
+    detail: str,
+    detected_at: datetime,
+) -> bool:
+    """Persist rule-level scheduler corruption without creating fake history."""
+    from firebase_admin import firestore
+
+    db = get_db()
+    rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
+
+    @firestore.transactional
+    def record(transaction):
+        snap = rule_ref.get(transaction=transaction)
+        if not snap.exists:
+            return False
+        transaction.update(rule_ref, {
+            "scheduleStatus": "scheduler_error",
+            "schedulerError": {
+                "code": code,
+                "detail": detail,
+                "detectedAt": detected_at.astimezone(timezone.utc),
+            },
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        })
+        return True
+
+    return bool(record(db.transaction()))
+
 
 def get_occurrence(uid: str, event_id: str) -> Optional[Dict[str, Any]]:
     """Load one durable occurrence by its idempotency key."""
@@ -413,6 +549,19 @@ def claim_occurrence(
             scheduled_value = datetime.fromisoformat(scheduled_value.replace("Z", "+00:00")).astimezone(timezone.utc)
         except ValueError:
             pass
+
+    def recovery_claim_metadata(rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        recovery = rule_data.get("schedulerRecovery")
+        if not isinstance(recovery, dict) or recovery.get("status") != "requested":
+            return None
+        if not _same_persisted_instant(recovery.get("scheduledFor"), scheduled_value):
+            return None
+        return {
+            **recovery,
+            "status": "processing",
+            "occurrenceId": event_id,
+            "processingStartedAt": aware_now.astimezone(timezone.utc),
+        }
 
     @firestore.transactional
     def claim(transaction):
@@ -469,6 +618,9 @@ def claim_occurrence(
             }
             if next_scheduled_at is not None:
                 rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+            recovery_update = recovery_claim_metadata(rule_data)
+            if recovery_update is not None:
+                rule_updates["schedulerRecovery"] = recovery_update
             transaction.set(rule_ref, rule_updates, merge=True)
             return {"claim": "claimed", "record": {**data, "attemptCount": attempts}}
 
@@ -515,6 +667,9 @@ def claim_occurrence(
         }
         if next_scheduled_at is not None:
             rule_updates["nextScheduledAt"] = next_scheduled_at.astimezone(timezone.utc)
+        recovery_update = recovery_claim_metadata(rule_data)
+        if recovery_update is not None:
+            rule_updates["schedulerRecovery"] = recovery_update
         transaction.set(rule_ref, rule_updates, merge=True)
         return {"claim": "claimed", "record": initial}
 
@@ -714,6 +869,19 @@ def finalize_occurrence(
             "updatedAt": firestore.SERVER_TIMESTAMP,
             **clean_rule_updates,
         }
+        rule_data = rule_snap.to_dict() or {} if rule_snap.exists else {}
+        recovery = rule_data.get("schedulerRecovery")
+        if (
+            isinstance(recovery, dict)
+            and recovery.get("status") == "processing"
+            and recovery.get("occurrenceId") == event_id
+        ):
+            merged_rule_updates["schedulerRecovery"] = {
+                **recovery,
+                "status": "completed",
+                "completedAt": firestore.SERVER_TIMESTAMP,
+                "occurrenceStatus": status,
+            }
         # A user may delete the rule after the occurrence is claimed. Finalize
         # the permanent occurrence but never recreate a partial rule document.
         if rule_snap.exists:

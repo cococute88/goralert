@@ -20,6 +20,7 @@ import type { AlertRule, Recurrence, TriggerPolicy } from "./types";
 const DEFAULT_TZ = "Asia/Seoul";
 const DEFAULT_TIME = "09:00";
 const DAY_MS = 86_400_000;
+export const DURABLE_SCHEDULER_VERSION = 1;
 
 function parseHhMm(time: string | undefined): { hours: number; minutes: number } {
   const fallback = { hours: 9, minutes: 0 };
@@ -232,6 +233,21 @@ export function nextOccurrence(trigger: TriggerPolicy | undefined, from: Date = 
   }
 }
 
+// Browser write contract for a new or explicitly edited schedule. The cursor
+// is strictly after the write cutoff; calendar rules use the worker's daily
+// evaluation cadence even when the UI displays a selected event date.
+export function initialSchedulerCursor(
+  trigger: TriggerPolicy | undefined,
+  after: Date = new Date(),
+): Date | null {
+  const recurrence = trigger?.recurrence;
+  if (!recurrence) return null;
+  const strictAfter = new Date(after.getTime() + 1);
+  return recurrence.kind === "calendar"
+    ? nextDailyWallClockOccurrence(recurrence, strictAfter)
+    : nextOccurrence(trigger, strictAfter);
+}
+
 // Resolve an event-driven calendar rule against the same joined event contract
 // used by the Python engine. Other rule kinds keep the existing recurrence path.
 export function nextRuleOccurrence(
@@ -248,14 +264,12 @@ export function nextRuleOccurrence(
   const persisted = persistedDate(rule.nextScheduledAt);
   if (persisted && !(recurrence?.kind === "calendar" && isCalendarEventRule)) return persisted;
 
-  const lastProcessed = persistedDate(rule.lastProcessedScheduledAt);
-  const lastTriggered = persistedDate(rule.lastTriggeredAt);
-  const created = persistedDate(rule.createdAt);
-  const scheduleChanged = persistedDate(rule.scheduleChangedAt);
-  const legacyAnchor = scheduleChanged ?? lastProcessed ?? lastTriggered ?? created;
-  const legacyFrom = legacyAnchor
-    ? new Date(legacyAnchor.getTime() + (scheduleChanged || lastProcessed || lastTriggered ? 1 : 0))
-    : from;
+  // Versioned data without a cursor is corrupt, not legacy. Pre-version rows
+  // display the first future occurrence, matching the no-backlog migration.
+  const hasDurableMetadata = rule.durableSchedulerVersion !== undefined
+    || rule.schedulerMigration !== undefined;
+  if (!persisted && hasDurableMetadata) return null;
+  const legacyFrom = from;
   if (recurrence?.kind !== "calendar") {
     return nextOccurrence(rule.trigger, legacyFrom);
   }

@@ -31,7 +31,7 @@ const {
   normalizeAuthoritativeCalendarEvent,
   resolveGeneratedCalendarEvents,
 } = calendarContract;
-const { nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
+const { initialSchedulerCursor, nextRuleOccurrence } = loadTsModule("lib/alerts/schedule.ts", {
   "@/lib/calendar-contract": calendarContract,
 });
 
@@ -297,5 +297,56 @@ test("legacy Firestore document identity still matches existing bell marks", () 
   assert.equal(
     findMatchingCalendarIdentityKey(keys, ["legacy-firestore-doc"]),
     "legacy-firestore-doc",
+  );
+});
+
+test("new recurring rule cursor is strictly future in the rule timezone", () => {
+  const cutoff = new Date("2026-08-02T00:00:00.000Z"); // 09:00 Asia/Seoul
+  assert.equal(
+    initialSchedulerCursor({
+      mode: "recurring",
+      recurrence: { kind: "monthlyLastDay", time: "12:15", tz: "Asia/Seoul" },
+    }, cutoff)?.toISOString(),
+    "2026-08-31T03:15:00.000Z",
+  );
+  assert.equal(
+    initialSchedulerCursor({
+      mode: "recurring",
+      recurrence: { kind: "calendar", time: "09:00", tz: "Asia/Seoul" },
+    }, cutoff)?.toISOString(),
+    "2026-08-03T00:00:00.000Z",
+  );
+});
+
+test("legacy UI preview ignores historical anchors and shows the first future occurrence", () => {
+  const legacy = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    createdAt: "2025-01-01T00:00:00.000Z",
+    lastTriggeredAt: "2026-07-01T00:00:00.000Z",
+  };
+
+  assert.equal(
+    nextRuleOccurrence(legacy, [], new Date("2026-08-02T00:00:00.000Z"))?.toISOString(),
+    "2026-08-31T22:00:00.000Z",
+  );
+});
+
+test("versioned rule without a cursor is displayed as corrupt without crashing", () => {
+  const corrupt = {
+    ...metricRule("07:00"),
+    trigger: {
+      mode: "recurring",
+      recurrence: { kind: "monthlyFirstDay", time: "07:00", tz: "Asia/Seoul" },
+    },
+    durableSchedulerVersion: 1,
+  };
+
+  assert.equal(
+    nextRuleOccurrence(corrupt, [], new Date("2026-08-02T00:00:00.000Z")),
+    null,
   );
 });

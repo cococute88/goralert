@@ -18,6 +18,7 @@ import {
   serverTimestamp,
   setDoc,
   startAfter,
+  Timestamp,
   updateDoc,
   where,
   type DocumentData,
@@ -59,6 +60,7 @@ import type {
   NotificationLog,
   PushDevice,
 } from "./types";
+import { DURABLE_SCHEDULER_VERSION, initialSchedulerCursor } from "./schedule";
 
 const DEFAULT_LOG_WINDOW = 200;
 const TERMINAL_SCHEDULE_STATUSES = new Set([
@@ -153,8 +155,23 @@ export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void>
     lastTriggeredAt: _lastTriggeredAt,
     lastValue: _lastValue,
     engineVersion: _engineVersion,
+    durableSchedulerVersion: _durableSchedulerVersion,
+    schedulerMigration: _schedulerMigration,
+    schedulerRecovery: _schedulerRecovery,
+    schedulerError: _schedulerError,
     ...editableRule
   } = rule;
+  const writeCutoff = new Date();
+  const initialCursor = initialSchedulerCursor(rule.trigger, writeCutoff);
+  if (rule.trigger.recurrence && !initialCursor) {
+    throw new Error("유효한 다음 반복 알림 시각을 계산할 수 없습니다.");
+  }
+  const schedulerWrite = rule.trigger.recurrence && initialCursor
+    ? {
+        durableSchedulerVersion: DURABLE_SCHEDULER_VERSION,
+        nextScheduledAt: Timestamp.fromDate(initialCursor),
+      }
+    : {};
   const payload = sanitizeFirestorePayload({
     ...editableRule,
     uid,
@@ -165,7 +182,7 @@ export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void>
   await runTransaction(db, async (transaction) => {
     const currentSnap = await transaction.get(ruleRef);
     if (!currentSnap.exists()) {
-      transaction.set(ruleRef, payload, { merge: true });
+      transaction.set(ruleRef, { ...payload, ...schedulerWrite }, { merge: true });
       return;
     }
 
@@ -196,8 +213,8 @@ export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void>
           eventId,
           ruleId: rule.id,
           kind: current.kind,
-          firedAt: new Date().toISOString(),
-          evaluatedAt: new Date().toISOString(),
+          firedAt: writeCutoff.toISOString(),
+          evaluatedAt: writeCutoff.toISOString(),
           message,
           channels: [],
           isTest: false,
@@ -205,7 +222,7 @@ export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void>
           status: "cancelled",
           scheduledFor: cursor.toISOString(),
           timezone,
-          completedAt: new Date().toISOString(),
+          completedAt: writeCutoff.toISOString(),
           attemptCount: 0,
           nextScheduleUpdated: true,
           failureCode: "schedule_changed",
@@ -217,7 +234,12 @@ export async function saveAlertRule(uid: string, rule: AlertRule): Promise<void>
 
     transaction.set(ruleRef, {
       ...payload,
-      nextScheduledAt: deleteField(),
+      ...(rule.trigger.recurrence
+        ? schedulerWrite
+        : {
+            nextScheduledAt: deleteField(),
+            durableSchedulerVersion: deleteField(),
+          }),
       scheduleChangedAt: serverTimestamp(),
       scheduleStatus: "schedule_changed",
     }, { merge: true });

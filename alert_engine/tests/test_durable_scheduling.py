@@ -319,7 +319,7 @@ def test_rule_disabled_after_claim_but_before_provider_call_never_sends():
     assert all(channel["status"] == "failed" for channel in record["channels"])
 
 
-def test_schedule_change_anchor_does_not_replay_new_cadence_from_creation():
+def test_pre_version_schedule_change_bootstraps_future_without_replay():
     rule = _rule("monthlyFirstDay", datetime(2026, 7, 1, 7, 0, tzinfo=KST), "edited")
     rule.nextScheduledAt = None
     rule.createdAt = datetime(2026, 1, 1, 0, 0, tzinfo=KST)
@@ -329,7 +329,8 @@ def test_schedule_change_anchor_does_not_replay_new_cadence_from_creation():
 
     result = engine.process_rule(rule, now=datetime(2026, 8, 1, 9, 20, tzinfo=KST))
 
-    assert result.status == STATUS_NOT_DUE
+    assert result.status == "legacy_cursor_initialized"
+    assert fs.legacy_cursor == datetime(2026, 8, 31, 22, 0, tzinfo=timezone.utc)
     assert fs.logs == {}
     assert telegram.calls == push.calls == 0
 

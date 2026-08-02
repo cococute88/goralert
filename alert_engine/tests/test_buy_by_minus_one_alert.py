@@ -43,7 +43,10 @@ def _process(event_date: str, event_types: list[str], now: datetime, rule_id: st
     }])
     firestore = FakeFirestore()
     engine = build_engine(datasource, firestore, {"telegram": FakeChannel("telegram")})
-    return engine.process_rule(_calendar_rule(event_types, rule_id), now=now), firestore
+    rule = _calendar_rule(event_types, rule_id)
+    rule.durableSchedulerVersion = 1
+    rule.nextScheduledAt = now.replace(minute=0, second=0, microsecond=0)
+    return engine.process_rule(rule, now=now), firestore
 
 
 @pytest.mark.parametrize(
@@ -94,8 +97,11 @@ def test_buy_by_and_buy_by_minus_one_are_independent_and_can_both_fire():
     firestore = FakeFirestore()
     engine = build_engine(datasource, firestore, {"telegram": FakeChannel("telegram")})
     rule = _calendar_rule(["buy_by", "buy_by_minus_1"], "both")
+    rule.durableSchedulerVersion = 1
+    rule.nextScheduledAt = sunday_now.replace(minute=0, second=0, microsecond=0)
 
     assert engine.process_rule(rule, now=sunday_now).status == STATUS_DELIVERED
+    rule.nextScheduledAt = monday_now.replace(minute=0, second=0, microsecond=0)
     assert engine.process_rule(rule, now=monday_now).status == STATUS_DELIVERED
     assert len(firestore.logs) == 2
     # The derived notification never creates or modifies a calendar event.

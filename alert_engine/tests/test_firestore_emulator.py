@@ -138,8 +138,7 @@ def test_real_lease_recovery_rejects_stale_finalizer_and_persists_channel_result
     assert {row["channel"]: row["status"] for row in stored["channels"]}["telegram"] == "sent"
 
 
-def test_real_legacy_cursor_backfill_catches_up_and_history_query_exposes_occurrence():
-    scheduled = datetime(2026, 7, 31, 12, 15, tzinfo=KST)
+def test_real_legacy_cursor_initialization_skips_backlog_and_writes_no_history():
     uid, rule_ref = _refs("rule")
     data = _rule_data(
         uid,
@@ -152,15 +151,19 @@ def test_real_legacy_cursor_backfill_catches_up_and_history_query_exposes_occurr
     push = FakeChannel("push")
     engine = build_engine(FakeDataSource(), firestore_client, {"telegram": telegram, "push": push})
 
-    result = engine.process_rule(rule, now=datetime(2026, 7, 31, 12, 20, tzinfo=KST))
+    result = engine.process_rule(rule, now=datetime(2026, 8, 2, 9, 0, tzinfo=KST))
 
-    assert result.status == "delivered"
-    assert telegram.calls == push.calls == 1
+    assert result.status == "legacy_cursor_initialized"
+    assert telegram.calls == push.calls == 0
     stored_rule = rule_ref.get().to_dict()
     assert stored_rule and stored_rule["nextScheduledAt"] == datetime(2026, 8, 31, 3, 15, tzinfo=timezone.utc)
+    assert stored_rule["durableSchedulerVersion"] == 1
+    assert stored_rule["schedulerMigration"]["backlogPolicy"] == "skip_automatic_backlog"
+    assert stored_rule["schedulerMigration"]["backlogSkippedThrough"] == datetime(
+        2026, 8, 2, 0, 0, tzinfo=timezone.utc,
+    )
     history = list(rule_ref.parent.parent.collection("notificationLogs").stream())
-    assert len(history) == 1
-    assert history[0].to_dict()["scheduledFor"] == scheduled.astimezone(timezone.utc).isoformat()
+    assert history == []
 
     # The configured collection-group index path is exercised as well.
     loaded = firestore_client.list_enabled_rules()
@@ -261,3 +264,127 @@ def test_audit_recovery_rejects_legacy_log_with_random_document_id():
         audit._prepare_recovery(
             uid, "rule", "2026-08-01T07:00:00+09:00", acknowledged=True,
         )
+
+
+def test_two_real_workers_initialize_legacy_cursor_once_and_converge():
+    uid, rule_ref = _refs("rule")
+    recurrence = {"kind": "monthlyLastDay", "time": "12:15", "tz": "Asia/Seoul"}
+    data = _rule_data(uid, recurrence, datetime(2025, 1, 1, tzinfo=KST))
+    rule_ref.set(data)
+    trigger = data["trigger"]
+    future = datetime(2026, 8, 31, 12, 15, tzinfo=KST)
+    cutoff = datetime(2026, 8, 2, 9, 0, tzinfo=KST)
+
+    def initialize(_worker: str):
+        return firestore_client.initialize_legacy_scheduler_cursor(
+            uid, "rule", trigger, None, future, cutoff,
+        )["initialization"]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(initialize, ["worker-a", "worker-b"]))
+
+    assert sorted(outcomes) == ["already_initialized", "initialized"]
+    stored = rule_ref.get().to_dict()
+    assert stored and stored["nextScheduledAt"] == future.astimezone(timezone.utc)
+    assert stored["schedulerMigration"]["initializedNextScheduledAt"] == future.astimezone(timezone.utc)
+    assert list(rule_ref.parent.parent.collection("notificationLogs").stream()) == []
+
+
+@pytest.mark.parametrize("race", ["edit", "delete", "disable"])
+def test_real_legacy_initialization_rechecks_rule_state_without_partial_recreation(race):
+    uid, rule_ref = _refs("rule")
+    recurrence = {"kind": "weekly", "weekday": 1, "time": "10:00", "tz": "Asia/Seoul"}
+    data = _rule_data(uid, recurrence, datetime(2025, 1, 1, tzinfo=KST))
+    rule_ref.set(data)
+    if race == "edit":
+        rule_ref.update({
+            "trigger": {
+                "mode": "recurring",
+                "recurrence": {"kind": "weekly", "weekday": 2, "time": "11:00", "tz": "Asia/Seoul"},
+            },
+        })
+    elif race == "delete":
+        rule_ref.delete()
+    else:
+        rule_ref.update({"enabled": False})
+
+    result = firestore_client.initialize_legacy_scheduler_cursor(
+        uid,
+        "rule",
+        data["trigger"],
+        None,
+        datetime(2026, 8, 3, 10, 0, tzinfo=KST),
+        datetime(2026, 8, 2, 9, 0, tzinfo=KST),
+    )
+
+    expected = "schedule_changed" if race == "edit" else "inactive"
+    assert result["initialization"] == expected
+    stored = rule_ref.get()
+    if race == "delete":
+        assert not stored.exists
+    else:
+        assert "schedulerMigration" not in (stored.to_dict() or {})
+        assert "nextScheduledAt" not in (stored.to_dict() or {})
+
+
+def test_worker_immediately_after_legacy_initialization_uses_future_cursor_normally():
+    uid, rule_ref = _refs("rule")
+    recurrence = {"kind": "monthlyLastDay", "time": "12:15", "tz": "Asia/Seoul"}
+    data = _rule_data(uid, recurrence, datetime(2025, 1, 1, tzinfo=KST))
+    rule_ref.set(data)
+    telegram = FakeChannel("telegram")
+    push = FakeChannel("push")
+    engine = build_engine(FakeDataSource(), firestore_client, {"telegram": telegram, "push": push})
+
+    first = engine.process_rule(
+        AlertRule.from_dict(data),
+        now=datetime(2026, 8, 2, 9, 0, tzinfo=KST),
+    )
+    reloaded = AlertRule.from_dict({"id": "rule", "uid": uid, **(rule_ref.get().to_dict() or {})})
+    second = engine.process_rule(
+        reloaded,
+        now=datetime(2026, 8, 31, 12, 16, tzinfo=KST),
+    )
+
+    assert first.status == "legacy_cursor_initialized"
+    assert second.status == "delivered"
+    assert telegram.calls == push.calls == 1
+    history = list(rule_ref.parent.parent.collection("notificationLogs").stream())
+    assert len(history) == 1
+    assert history[0].to_dict()["scheduledFor"] == "2026-08-31T03:15:00+00:00"
+
+
+def test_explicit_recovery_and_legacy_initialization_race_converges_to_recovery_request():
+    uid, rule_ref = _refs("rule")
+    recurrence = {"kind": "monthlyFirstDay", "time": "07:00", "tz": "Asia/Seoul"}
+    data = _rule_data(uid, recurrence, datetime(2019, 1, 1, tzinfo=KST))
+    rule_ref.set(data)
+
+    def initialize():
+        return firestore_client.initialize_legacy_scheduler_cursor(
+            uid,
+            "rule",
+            data["trigger"],
+            None,
+            datetime(2026, 9, 1, 7, 0, tzinfo=KST),
+            datetime(2026, 8, 2, 9, 0, tzinfo=KST),
+        )
+
+    def recover():
+        return audit._prepare_recovery(
+            uid, "rule", "2020-08-01T07:00:00+09:00", acknowledged=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        init_future = pool.submit(initialize)
+        recovery_future = pool.submit(recover)
+        init_future.result()
+        recovery_future.result()
+
+    stored = rule_ref.get().to_dict()
+    assert stored and stored["durableSchedulerVersion"] == 1
+    assert stored["scheduleStatus"] == "recovery_requested"
+    assert stored["nextScheduledAt"] == datetime(2020, 7, 31, 22, 0, tzinfo=timezone.utc)
+    assert stored["schedulerRecovery"]["status"] == "requested"
+    assert stored["schedulerRecovery"]["duplicateRiskAcknowledged"] is True
+    assert list(rule_ref.parent.parent.collection("notificationLogs").stream()) == []

@@ -40,6 +40,12 @@ Key design properties:
 - **Durable scheduled occurrences.** Scheduled rules persist
   `nextScheduledAt`; a due occurrence never expires. The occurrence record and
   next cursor are committed atomically before delivery.
+- **No automatic legacy backlog.** A pre-version recurring rule without a
+  cursor is transactionally initialized to its first strictly future
+  occurrence. The migration records `skip_automatic_backlog` metadata and does
+  not evaluate, claim, create history, or call a provider in that run.
+- **Corruption is explicit.** A versioned rule without `nextScheduledAt` is
+  recorded as a scheduler error and is never silently treated as legacy.
 - **Idempotent.** Every scheduled fire maps to a stable
   `eventId = ruleId:scheduledWallClockTime`. Firestore create + leases prevent
   concurrent workers from sending the same occurrence.
@@ -186,6 +192,7 @@ Tests are mapped to the design's correctness properties:
 | `test_recurrence.py` | recurrence cadence + eventId determinism |
 | `test_rsi_reuse.py` | reuse of `original/logic/market.compute_rsi` |
 | `test_regression.py` | recurrence stability, import surface, global kill-switch |
+| `test_legacy_scheduler_migration.py` | future-only legacy bootstrap, races, recovery separation |
 
 ---
 
@@ -223,9 +230,10 @@ The engine + tests are complete; only real secrets/data are outstanding:
       `alertSettings.pushDevices` and the compatible `pushTokens` array. The
       engine merges both sources and de-duplicates tokens; until registration
       succeeds, push fails gracefully.
-- [ ] **Firestore index** — composite/`collection_group` query on `alertRules`
-      `enabled == true` (already declared in `firestore.indexes.json`; deploy it
-      with `firebase deploy --only firestore:indexes`).
+- [ ] **Firestore indexes** — deploy the four required `notificationLogs` composites and
+      `alertRules.enabled` collection-group override from `firestore.indexes.json`
+      with `firebase deploy --only firestore:indexes --project gorani-vercel`,
+      then wait until every index is READY before enabling the worker.
 - [ ] Verify cron cadence in `.github/workflows/alert-engine.yml` (UTC; KST = UTC+9).
 
 With those in place the scheduled workflow processes live rules end to end. No

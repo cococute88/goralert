@@ -222,6 +222,19 @@ def next_scheduled_occurrence(
     return scheduled_occurrence(recurrence, occurrence + timedelta(microseconds=1))
 
 
+def first_future_scheduled_occurrence(
+    recurrence: Optional[Recurrence],
+    after: datetime,
+) -> Optional[datetime]:
+    """Return the first scheduled occurrence strictly after ``after``.
+
+    Legacy cursor migration uses this boundary so the worker never claims an
+    occurrence at or before the migration cutoff. Calendar recurrences use the
+    same daily evaluation cadence as the durable worker.
+    """
+    return scheduled_occurrence(recurrence, after + timedelta(microseconds=1))
+
+
 def due_occurrence(
     recurrence: Optional[Recurrence],
     now: datetime,

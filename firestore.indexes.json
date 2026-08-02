@@ -4,13 +4,6 @@
       "collectionGroup": "notificationLogs",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "firedAt", "order": "DESCENDING" }
-      ]
-    },
-    {
-      "collectionGroup": "notificationLogs",
-      "queryScope": "COLLECTION",
-      "fields": [
         { "fieldPath": "kind", "order": "ASCENDING" },
         { "fieldPath": "firedAt", "order": "DESCENDING" }
       ]

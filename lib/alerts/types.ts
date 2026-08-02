@@ -172,12 +172,41 @@ export type AlertRule = {
   lastValue?: number | string;
   ruleVersion?: number;
   engineVersion?: string;
+  durableSchedulerVersion?: number;
+  schedulerMigration?: {
+    kind: "legacy_cursor_bootstrap";
+    migratedAt?: unknown;
+    backlogPolicy: "skip_automatic_backlog";
+    backlogSkippedThrough: unknown;
+    initializedNextScheduledAt: unknown;
+  };
+  schedulerRecovery?: {
+    status: "requested" | "processing" | "completed";
+    requestedAt?: unknown;
+    scheduledFor: unknown;
+    occurrenceId?: string;
+    duplicateRiskAcknowledged: boolean;
+    requestedBy: "operator_audit";
+    previousNextScheduledAt?: unknown;
+    processingStartedAt?: unknown;
+    completedAt?: unknown;
+    occurrenceStatus?: NotificationStatus;
+  };
+  schedulerError?: {
+    code: string;
+    detail: string;
+    detectedAt: unknown;
+  };
   // Canonical scheduler cursor. Firestore persists a Timestamp; older rows may
   // contain an ISO string and are normalized by schedule.ts.
   nextScheduledAt?: unknown;
   lastProcessedScheduledAt?: unknown;
   lastOccurrenceId?: string;
-  scheduleStatus?: NotificationStatus | "schedule_changed" | "recovery_requested";
+  scheduleStatus?: NotificationStatus
+    | "schedule_changed"
+    | "recovery_requested"
+    | "legacy_cursor_initialized"
+    | "scheduler_error";
   scheduleChangedAt?: unknown;
   createdAt?: unknown;
   updatedAt?: unknown;
