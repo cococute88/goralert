@@ -42,7 +42,7 @@ from .engine import (
     STATUS_PARTIAL_FAILURE,
     STATUS_PROVIDER_ERROR,
 )
-from .models import AlertRule, AlertSettings
+from .models import AlertRule
 
 logger = logging.getLogger("alert_engine.main")
 
@@ -131,7 +131,6 @@ def run(argv: Optional[List[str]] = None) -> int:
     engine = AlertEngine(config=cfg, firestore=firestore_client)
 
     # Per-user settings cache + globalEnabled gate.
-    settings_cache: Dict[str, AlertSettings] = {}
     by_uid: Dict[str, List[AlertRule]] = defaultdict(list)
     for rule in rules:
         by_uid[rule.uid].append(rule)
@@ -144,10 +143,10 @@ def run(argv: Optional[List[str]] = None) -> int:
         try:
             settings = firestore_client.load_alert_settings(uid)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("settings load failed for uid=%s (%s); using defaults", uid, exc)
-            settings = AlertSettings()
-        settings_cache[uid] = settings
-
+            logger.error("settings load failed for uid=%s (%s); skipping %d rule(s)", uid, exc, len(uid_rules))
+            status_counts["settings_unavailable"] += len(uid_rules)
+            errors += 1
+            continue
         if not settings.globalEnabled:
             logger.info("uid=%s globalEnabled=false -> skipping %d rule(s)", uid, len(uid_rules))
             status_counts["skipped_global_disabled"] += len(uid_rules)

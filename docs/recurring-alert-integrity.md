@@ -157,14 +157,16 @@ Firestore는 schemaless이므로 DDL 마이그레이션은 없다. 기존 규칙
 
 1. worker를 중지하고 queued/in-progress 실행이 없는지 확인한다.
 2. 대상 프로젝트가 `gorani-vercel`인지 확인한 뒤 indexes를 먼저 배포하고 composite 4개와
-   `alertRules.enabled` collection-group field override가 모두 READY가 될 때까지 기다린다.
+   `alertRules.enabled`, `testPushRequests.status` collection-group field override가 모두 READY가
+   될 때까지 기다린다.
 3. 신규 프런트엔드 코드를 배포한다.
 4. 프런트엔드 호환성을 확인한 뒤 Firestore rules를 별도로 배포한다.
 5. read-only audit로 legacy/migrated/corrupt/recovery/overdue 상태를 확인한다.
 6. worker를 재활성화하고 첫 실행에서 legacy 규칙이 미래 cursor만 초기화하는지 모니터링한다.
 
-`alertRules.enabled` collection-group 인덱스는 `firestore.indexes.json`에 선언되어 있다. 배포되지
-않으면 엔진은 전체 collection-group scan으로 우회하지 않고 실패한다.
+`alertRules.enabled`와 `testPushRequests.status` collection-group 인덱스는
+`firestore.indexes.json`에 선언되어 있다. 배포되지 않으면 엔진은 전체 collection-group scan으로
+우회하지 않고 실패한다.
 
 `notificationLogs.firedAt DESC` 단독 정렬은 Firestore 자동 single-field index가 제공한다. 이를
 composite 목록에 선언하면 Firebase API가 `index is not necessary`로 배포를 거부하므로 별도

@@ -3,6 +3,10 @@ import fs from "node:fs";
 import test from "node:test";
 import { serverTimestamp, Timestamp } from "firebase/firestore";
 import { sanitizeFirestorePayload } from "../lib/alerts/firestore-payload.mjs";
+import {
+  defaultAlertSettingsData,
+  normalizeAlertSettingsData,
+} from "../lib/alerts/alert-settings-data.mjs";
 
 test("removes undefined recursively while preserving valid primitive values", () => {
   const payload = sanitizeFirestorePayload({
@@ -54,17 +58,34 @@ test("preserves the UTC Firestore Timestamp used by the durable cursor contract"
   assert.equal(payload.nextScheduledAt.toDate().toISOString(), instant.toISOString());
 });
 
+test("alert settings preserve persisted false and default missing boolean values", () => {
+  assert.deepEqual(defaultAlertSettingsData(), { globalEnabled: true });
+  assert.equal(normalizeAlertSettingsData({ globalEnabled: false }).globalEnabled, false);
+  assert.equal(normalizeAlertSettingsData({ globalEnabled: true }).globalEnabled, true);
+  assert.equal(normalizeAlertSettingsData({ pushTokens: [] }).globalEnabled, true);
+});
+
 test("Firestore index manifest contains only deployable query indexes", () => {
   const manifest = JSON.parse(fs.readFileSync("firestore.indexes.json", "utf8"));
 
   assert.equal(manifest.indexes.length, 4);
   assert.ok(manifest.indexes.every((index) => index.fields.length >= 2));
-  assert.deepEqual(manifest.fieldOverrides, [{
-    collectionGroup: "alertRules",
-    fieldPath: "enabled",
-    indexes: [
-      { queryScope: "COLLECTION", order: "ASCENDING" },
-      { queryScope: "COLLECTION_GROUP", order: "ASCENDING" },
-    ],
-  }]);
+  assert.deepEqual(manifest.fieldOverrides, [
+    {
+      collectionGroup: "alertRules",
+      fieldPath: "enabled",
+      indexes: [
+        { queryScope: "COLLECTION", order: "ASCENDING" },
+        { queryScope: "COLLECTION_GROUP", order: "ASCENDING" },
+      ],
+    },
+    {
+      collectionGroup: "testPushRequests",
+      fieldPath: "status",
+      indexes: [
+        { queryScope: "COLLECTION", order: "ASCENDING" },
+        { queryScope: "COLLECTION_GROUP", order: "ASCENDING" },
+      ],
+    },
+  ]);
 });

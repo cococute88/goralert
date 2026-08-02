@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import sys
 from datetime import datetime, timedelta, timezone
@@ -44,6 +45,68 @@ def test_price_result_is_finite_and_carries_provider_timestamp(monkeypatch):
     assert result.status == "ok"
     assert result.value == pytest.approx(101.5)
     assert result.observed_at == frame.index[-1].to_pydatetime()
+
+
+def test_single_symbol_multiindex_close_is_normalized(monkeypatch):
+    index = pd.date_range(end=NOW - timedelta(hours=1), periods=2, freq="D", tz="UTC")
+    frame = pd.DataFrame(
+        [[99.0, 98.0], [101.5, 100.0]],
+        index=index,
+        columns=pd.MultiIndex.from_tuples(
+            [("Close", "MSFT"), ("Open", "MSFT")],
+            names=["Price", "Ticker"],
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame))
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "ok"
+    assert result.value == pytest.approx(101.5)
+    assert result.metadata["priceField"] == "Close"
+
+
+def test_reversed_multiindex_and_adj_close_only_are_supported(monkeypatch):
+    index = pd.date_range(end=NOW - timedelta(hours=1), periods=2, freq="D", tz="UTC")
+    reversed_frame = pd.DataFrame(
+        [[99.0], [101.5]],
+        index=index,
+        columns=pd.MultiIndex.from_tuples(
+            [("MSFT", "Close")],
+            names=["Ticker", "Price"],
+        ),
+    )
+    adj_only_frame = pd.DataFrame({"Adj Close": [60.0, 61.25]}, index=index)
+    frames = {"MSFT": reversed_frame, "SCHD": adj_only_frame}
+    monkeypatch.setitem(
+        sys.modules,
+        "yfinance",
+        SimpleNamespace(download=lambda symbol, **kwargs: frames[symbol]),
+    )
+    source = AlertDataSource(now_fn=lambda: NOW)
+
+    msft = source.get_metric_result(MetricId(metric="price", ticker="MSFT"))
+    schd = source.get_metric_result(MetricId(metric="price", ticker="SCHD"))
+    ratio = source.get_ratio_result("MSFT", "SCHD")
+
+    assert (msft.status, msft.value, msft.metadata["priceField"]) == ("ok", 101.5, "Close")
+    assert (schd.status, schd.value, schd.metadata["priceField"]) == ("ok", 61.25, "Adj Close")
+    assert ratio.status == "ok"
+    assert ratio.value == pytest.approx(101.5 / 61.25)
+
+
+def test_mixed_string_numeric_close_keeps_usable_rows(monkeypatch):
+    frame = _frame(["not-a-number", "100.25", 101], NOW - timedelta(hours=1))
+    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(download=lambda *args, **kwargs: frame))
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "ok"
+    assert result.value == pytest.approx(101.0)
 
 
 @pytest.mark.parametrize(
@@ -103,6 +166,25 @@ def test_price_provider_timeout_and_malformed_response_are_distinct(monkeypatch)
     assert bad_payload.code == "malformed_response"
 
 
+def test_ticker_history_json_parse_exception_is_provider_error(monkeypatch):
+    class BrokenTicker:
+        def history(self, **kwargs):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "yfinance",
+        SimpleNamespace(Ticker=lambda symbol: BrokenTicker()),
+    )
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "provider_error"
+    assert result.code == "provider_response_parse_error"
+
+
 @pytest.mark.parametrize(
     ("error", "expected_code"),
     [
@@ -136,6 +218,24 @@ def test_empty_provider_result_and_blank_ticker_are_distinct(monkeypatch):
     )
     assert (no_rows.status, no_rows.code) == ("no_data", "symbol_no_data")
     assert (invalid.status, invalid.code) == ("invalid_input", "missing_ticker")
+
+
+def test_empty_frame_with_yfinance_parse_error_is_provider_error(monkeypatch):
+    fake_yfinance = SimpleNamespace(
+        download=lambda *args, **kwargs: pd.DataFrame(),
+        shared=SimpleNamespace(
+            _ERRORS={"MSFT": "JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"},
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
+
+    result = AlertDataSource(now_fn=lambda: NOW).get_metric_result(
+        MetricId(metric="price", ticker="MSFT")
+    )
+
+    assert result.status == "provider_error"
+    assert result.code == "provider_response_parse_error"
+    assert result.metadata == {"symbol": "MSFT"}
 
 
 def test_stale_price_and_non_finite_price_are_not_comparable(monkeypatch):

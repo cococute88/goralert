@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 from datetime import datetime
 
+from alert_engine.config import EngineConfig
 from alert_engine.event import make_event_id
 from alert_engine.models import AlertSettings, Recurrence, TriggerPolicy
 from alert_engine.recurrence import bucket_time, get_tz, next_occurrence
@@ -116,3 +117,36 @@ def test_global_enabled_allows_send():
     r = engine.process_rule(rule, now=_kst(2024, 5, 1, 12, 0), settings=settings)
     assert r.status == STATUS_DELIVERED
     assert len(fs.logs) == 1
+
+
+def test_global_enabled_false_survives_firestore_model_parsing():
+    assert AlertSettings.from_dict({"globalEnabled": False}).globalEnabled is False
+    assert AlertSettings.from_dict({"globalEnabled": True}).globalEnabled is True
+    assert AlertSettings.from_dict({}).globalEnabled is True
+
+
+def test_runner_skips_all_user_rules_when_settings_read_fails(monkeypatch):
+    from alert_engine import firestore_client, main
+
+    rule = make_ratio_rule()
+    processed = []
+
+    class NeverProcessEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def process_rule(self, *args, **kwargs):
+            processed.append((args, kwargs))
+            raise AssertionError("provider/evaluation boundary must not be reached")
+
+    monkeypatch.setattr(main, "load_config", lambda: EngineConfig(has_inline_service_account=True))
+    monkeypatch.setattr(main, "AlertEngine", NeverProcessEngine)
+    monkeypatch.setattr(firestore_client, "list_enabled_rules", lambda uid=None: [rule])
+    monkeypatch.setattr(
+        firestore_client,
+        "load_alert_settings",
+        lambda uid: (_ for _ in ()).throw(RuntimeError("settings unavailable")),
+    )
+
+    assert main.run([]) == 1
+    assert processed == []

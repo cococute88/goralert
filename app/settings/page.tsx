@@ -43,6 +43,7 @@ import {
   removePushRegistrations,
   resetPushRegistrations,
   saveAlertSettings,
+  watchAlertSettings,
   waitForTestPushResult,
   type PushRegistrationTarget,
 } from "@/lib/alerts/repositories";
@@ -352,6 +353,7 @@ export default function GoralertSettingsPage() {
 
   const [settings, setSettings] = useState<AlertSettings>({ globalEnabled: true });
   const [loading, setLoading] = useState(true);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [savingField, setSavingField] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [phase, setPhase] = useState<TestPhase>({ kind: "idle" });
@@ -382,15 +384,28 @@ export default function GoralertSettingsPage() {
     if (!user) return;
     let active = true;
     setLoading(true);
-    loadAlertSettings(user.uid)
-      .then(async (loaded) => {
+    setSettingsLoadError(null);
+    const unsubscribe = watchAlertSettings(
+      user.uid,
+      (loaded) => {
         if (!active) return;
         setSettings(loaded);
         setTelegramChatId(loaded.telegramChatId ?? "");
         setDefaultAlertTime(loaded.defaultAlertTime ?? "");
         setDefaultMessageTitle(loaded.defaultMessageTitle ?? "");
         setDefaultMessageBody(loaded.defaultMessageBody ?? "");
-        const current = await inspectCurrentPushRegistration(user.uid);
+        setSettingsLoadError(null);
+        setLoading(false);
+      },
+      () => {
+        if (!active) return;
+        setSettingsLoadError("저장된 설정을 확인할 수 없습니다. 새로고침 후 다시 시도해 주세요.");
+        setLoading(false);
+        toast.error("설정 불러오기에 실패했습니다.");
+      },
+    );
+    void inspectCurrentPushRegistration(user.uid)
+      .then((current) => {
         if (!active) return;
         setCurrentPush(current);
         if (current.error) toast.error(current.error);
@@ -398,20 +413,15 @@ export default function GoralertSettingsPage() {
           setSettings((previous) => ({ ...previous, ...current.snapshot }));
         }
       })
-      .catch(() => {
-        if (active) {
-          setSettings({ globalEnabled: true });
-          toast.error("기기 목록 불러오기에 실패했습니다.");
-        }
+      .catch((err) => {
+        if (active) toast.error(err instanceof Error ? err.message : "기기 목록 불러오기에 실패했습니다.");
       })
       .finally(() => {
-        if (active) {
-          setLoading(false);
-          setCheckingCurrentPush(false);
-        }
+        if (active) setCheckingCurrentPush(false);
       });
     return () => {
       active = false;
+      unsubscribe();
     };
   }, [toast, user]);
 
@@ -440,7 +450,8 @@ export default function GoralertSettingsPage() {
     setSavingField(field);
     try {
       await saveAlertSettings(user.uid, partial);
-      setSettings((prev) => ({ ...prev, ...partial }));
+      // The Firestore listener is authoritative. Do not present an optimistic
+      // value that could hide a rejected write or a newer change from another tab.
       toast.success("저장했어요");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "저장에 실패했습니다");
@@ -644,6 +655,18 @@ export default function GoralertSettingsPage() {
   if (authLoading) return <LoadingState />;
   if (!user) return <NoUserState />;
   if (loading) return <LoadingState />;
+  if (settingsLoadError) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-lg font-bold text-foreground">설정</h1>
+        <Card>
+          <CardSection>
+            <p className="text-sm text-danger" role="alert">{settingsLoadError}</p>
+          </CardSection>
+        </Card>
+      </div>
+    );
+  }
 
   const pushDeviceItems = buildPushDeviceList(settings, currentPush);
   const pushCount = pushDeviceItems.length;
@@ -685,6 +708,7 @@ export default function GoralertSettingsPage() {
           <Toggle
             checked={settings.globalEnabled}
             onChange={(next) => void persist("globalEnabled", { globalEnabled: next })}
+            disabled={savingField === "globalEnabled"}
             label="전체 알림 사용"
           />
         </div>

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from alert_engine import config as engine_config
+from alert_engine import firestore_client
 from alert_engine import test_push
 from alert_engine.channels import build_default_channels
 from alert_engine.channels.push import PushChannel
@@ -128,3 +129,29 @@ def test_drain_isolates_one_bad_request():
     counts = test_push.process_test_requests(engine=_engine(fs, push), firestore=fs)
     assert counts["processed"] == 2
     assert {m["req_id"] for m in fs.marks} == {"boom", "ok"}
+
+
+def test_all_user_pending_query_requires_index_without_full_scan_fallback(monkeypatch):
+    class MissingIndexQuery:
+        def where(self, **kwargs):
+            return self
+
+        def stream(self):
+            raise RuntimeError("The query requires an index")
+
+    class FakeDb:
+        def __init__(self):
+            self.collection_group_calls = 0
+
+        def collection_group(self, name):
+            assert name == "testPushRequests"
+            self.collection_group_calls += 1
+            return MissingIndexQuery()
+
+    db = FakeDb()
+    monkeypatch.setattr(firestore_client, "get_db", lambda: db)
+
+    with pytest.raises(RuntimeError, match="field override in firestore.indexes.json"):
+        firestore_client.list_pending_test_requests()
+
+    assert db.collection_group_calls == 1

@@ -29,6 +29,10 @@ import {
 import { firestoreDb } from "@/lib/firebase/client";
 import { sanitizeFirestorePayload } from "./firestore-payload.mjs";
 import {
+  defaultAlertSettingsData,
+  normalizeAlertSettingsData,
+} from "./alert-settings-data.mjs";
+import {
   normalizePushDevices,
   normalizePushTokens,
   removePushRegistrationsData,
@@ -76,7 +80,16 @@ function requireDb() {
 
 // Default settings returned when no settings doc exists yet.
 function defaultAlertSettings(): AlertSettings {
-  return { globalEnabled: true };
+  return defaultAlertSettingsData() as AlertSettings;
+}
+
+function normalizeAlertSettings(data: DocumentData): AlertSettings {
+  const normalized = normalizeAlertSettingsData(data) as AlertSettings;
+  return {
+    ...normalized,
+    pushTokens: normalizePushTokens(normalized.pushTokens),
+    pushDevices: normalizePushDevices(normalized.pushDevices) as PushDevice[],
+  };
 }
 
 // --- AlertRule ---------------------------------------------------------------
@@ -428,12 +441,23 @@ export async function loadAlertSettings(uid: string): Promise<AlertSettings> {
   if (!firestoreDb) return defaultAlertSettings();
   const snap = await getDoc(alertSettingsDoc(firestoreDb, uid));
   if (!snap.exists()) return defaultAlertSettings();
-  const data = snap.data() as unknown as AlertSettings;
-  return {
-    ...data,
-    pushTokens: normalizePushTokens(data.pushTokens),
-    pushDevices: normalizePushDevices(data.pushDevices) as PushDevice[],
-  };
+  return normalizeAlertSettings(snap.data());
+}
+
+export function watchAlertSettings(
+  uid: string,
+  onChange: (settings: AlertSettings) => void,
+  onError?: (error: Error) => void,
+): () => void {
+  if (!firestoreDb) {
+    onChange(defaultAlertSettings());
+    return () => {};
+  }
+  return onSnapshot(
+    alertSettingsDoc(firestoreDb, uid),
+    (snap) => onChange(snap.exists() ? normalizeAlertSettings(snap.data()) : defaultAlertSettings()),
+    (error) => onError?.(error),
+  );
 }
 
 export function watchAlertRules(
