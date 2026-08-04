@@ -12,9 +12,15 @@ import re
 from datetime import datetime
 from typing import Any, Dict, Optional, Union
 
+from .formatting import format_display_value
 from .models import AlertEvent, AlertRule, MessageTemplate
 
 _PLACEHOLDER_RE = re.compile(r"\{(\w+)\}")
+
+# Placeholders holding an ENGINE-COMPUTED current value (price / RSI / ratio /
+# fx / gold / bitcoin / koreanEtf / vix). Only these are display-rounded; the
+# user-authored {threshold}, {ticker} and {name} keep their literal text.
+_COMPUTED_VALUE_KEYS = frozenset({"value"})
 
 
 def make_event_id(rule_id: str, bucket: str) -> str:
@@ -28,6 +34,12 @@ def render_message(rule: AlertRule, variables: Optional[Dict[str, Any]] = None) 
     Known keys: {ticker} {value} {threshold} {name}. Unknown placeholders are
     left untouched (mirrors ``provider.ts::renderMessage``). Falls back to the
     rule name for both title and body when no template is set.
+
+    {value} — and only {value} — is display-rounded to at most two decimals by
+    :func:`alert_engine.formatting.format_display_value`. This is the single
+    shared rendering layer for every channel, so Telegram and Push always show
+    the same number. The evaluated value itself is untouched: comparison,
+    ``lastValue`` and the Firestore payload keep full precision.
     """
     template = rule.delivery.message if rule.delivery and rule.delivery.message else MessageTemplate(rule.name, rule.name)
     merged: Dict[str, Any] = {"name": rule.name}
@@ -37,7 +49,11 @@ def render_message(rule: AlertRule, variables: Optional[Dict[str, Any]] = None) 
     def substitute(text: str) -> str:
         def repl(match: "re.Match[str]") -> str:
             key = match.group(1)
-            return str(merged[key]) if key in merged else match.group(0)
+            if key not in merged:
+                return match.group(0)
+            if key in _COMPUTED_VALUE_KEYS:
+                return format_display_value(merged[key])
+            return str(merged[key])
 
         return _PLACEHOLDER_RE.sub(repl, text or "")
 
