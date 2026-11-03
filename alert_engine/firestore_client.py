@@ -39,6 +39,11 @@ from .models import AlertRule, AlertSettings, NotificationLog
 
 logger = logging.getLogger("alert_engine.firestore")
 
+from .reliability_store import (  # noqa: E402,F401
+    hold_scheduler_backlog, claim_test_request, begin_test_channel_attempt,
+    finish_test_request,
+)
+
 ALERT_RULES = "alertRules"
 NOTIFICATION_LOGS = "notificationLogs"
 ALERT_SETTINGS = "alertSettings"
@@ -372,7 +377,7 @@ TERMINAL_OCCURRENCE_STATUSES = {
     "sent", "partial_failure", "failed", "skipped", "cancelled",
     "disabled", "delivery_unknown", "condition_false", "no_data",
     "stale_data", "provider_error", "evaluation_error",
-    "skipped_quiet_hours", "skipped_cooldown",
+    "skipped_quiet_hours", "skipped_cooldown", "recovery_held",
 }
 
 DURABLE_SCHEDULER_VERSION = 1
@@ -921,7 +926,7 @@ def reserve_log(uid: str, event_id: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         # AlreadyExists (HTTP 409 / google.api_core.exceptions.AlreadyExists or
         # google.cloud.exceptions.Conflict) => someone already reserved this
-        # bucket. Anything else: re-raise so the engine can fall back.
+        # bucket. Anything else: re-raise; the engine must fail closed.
         name = type(exc).__name__
         if name in ("AlreadyExists", "Conflict") or "already exists" in str(exc).lower():
             return False
@@ -1038,13 +1043,13 @@ def list_pending_test_requests(uid: Optional[str] = None, limit: int = 50) -> Li
 
     if uid:
         col = db.collection("users").document(uid).collection(TEST_PUSH_REQUESTS)
-        snaps = list(col.where(filter=FieldFilter("status", "==", "pending")).stream())
+        snaps = list(col.where(filter=FieldFilter("status", "in", ["pending", "processing"])).stream())
         for snap in snaps:
-            out.append({"id": snap.id, "uid": uid, **(snap.to_dict() or {})})
+            out.append({**(snap.to_dict() or {}), "id": snap.id, "uid": uid})
     else:
         try:
             group = db.collection_group(TEST_PUSH_REQUESTS).where(
-                filter=FieldFilter("status", "==", "pending")
+                filter=FieldFilter("status", "in", ["pending", "processing"])
             )
             snaps = list(group.stream())
         except Exception as exc:  # noqa: BLE001
@@ -1056,7 +1061,7 @@ def list_pending_test_requests(uid: Optional[str] = None, limit: int = 50) -> Li
             ) from exc
         for snap in snaps:
             data = snap.to_dict() or {}
-            out.append({"id": snap.id, "uid": _extract_uid_from_path(snap), **data})
+            out.append({**data, "id": snap.id, "uid": _extract_uid_from_path(snap)})
 
     # Oldest first so requests are handled roughly in order.
     out.sort(key=lambda d: str(d.get("requestedAt") or ""))

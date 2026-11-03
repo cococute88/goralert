@@ -55,7 +55,8 @@ class TelegramChannel:
             # A timeout/connection loss after POST begins cannot prove whether
             # Telegram accepted the message. Preserve the ambiguity and never
             # authorize an automatic retry that could duplicate it.
-            return ChannelSendResult(self.name, "unknown", error=f"network error: {exc}")
+            # requests exceptions can include /bot<TOKEN>/sendMessage URLs.
+            return ChannelSendResult(self.name, "unknown", error=f"network error: {type(exc).__name__}")
 
         if resp.status_code == 200:
             try:
@@ -64,9 +65,10 @@ class TelegramChannel:
                 body = {}
             if body.get("ok"):
                 return ChannelSendResult(self.name, "sent", meta={"message_id": body.get("result", {}).get("message_id")})
-            return ChannelSendResult(self.name, "failed", error=f"telegram error: {body.get('description')}")
+            detail = str(body.get("description")).replace(token, "[redacted]").replace(str(chat_id), "[redacted]")
+            return ChannelSendResult(self.name, "failed", error=f"telegram error: {detail}")
         # Surface a trimmed body for diagnostics.
         return ChannelSendResult(
             self.name, "failed",
-            error=f"HTTP {resp.status_code}: {str(resp.text)[:200]}",
+            error=f"HTTP {resp.status_code}: {str(resp.text).replace(token, '[redacted]').replace(str(chat_id), '[redacted]')[:200]}",
         )

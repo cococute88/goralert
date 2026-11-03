@@ -254,6 +254,7 @@ class AlertEngine:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("lastValue update failed rule=%s (%s)", rule.id, exc)
+                    return ProcessResult(rule.id, rule.uid, STATUS_ERROR, "crossing_state_unavailable", eval_result.value)
             return ProcessResult(rule.id, rule.uid, STATUS_NOT_TRIGGERED, eval_result.detail, eval_result.value)
 
         # 5. quiet hours
@@ -294,13 +295,9 @@ class AlertEngine:
         try:
             reserved = self.firestore.reserve_log(rule.uid, event_id)
         except Exception as exc:  # noqa: BLE001
-            # Reservation unavailable -> fall back to a best-effort (non-atomic)
-            # existence check so a single-runner deployment still dedupes.
-            logger.warning("reserve_log failed rule=%s (%s); falling back to log_exists", rule.id, exc)
-            try:
-                reserved = not self.firestore.log_exists(rule.uid, event_id)
-            except Exception:  # noqa: BLE001
-                reserved = True
+            # A read can never replace ownership of an atomic reservation.
+            logger.error("reservation unavailable rule=%s error=%s", rule.id, type(exc).__name__)
+            return ProcessResult(rule.id, rule.uid, STATUS_ERROR, "reservation_unavailable", eval_result.value, event_id)
         if not reserved:
             return ProcessResult(rule.id, rule.uid, STATUS_DUPLICATE, "event already reserved", eval_result.value, event_id)
 
@@ -526,20 +523,21 @@ class AlertEngine:
                 "sent", "partial_failure", "failed", "skipped", "cancelled",
                 "disabled", "delivery_unknown", "condition_false", "no_data",
                 "stale_data", "provider_error", "evaluation_error",
-                "skipped_quiet_hours", "skipped_cooldown",
+                "skipped_quiet_hours", "skipped_cooldown", "recovery_held",
             }:
                 resume_event_id = rule.lastOccurrenceId
             elif resume_record and resume_record.get("status"):
                 # The log commit succeeded but the denormalized rule status was
                 # stale (for example, a client cached an older snapshot). Repair
                 # it idempotently without touching delivery.
-                try:
-                    self.firestore.finalize_occurrence(
-                        rule.uid, rule.id, rule.lastOccurrenceId,
-                        str(resume_record["status"]), {}, {},
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"schedule status repair failed: {exc}")
+                if not dry_run:
+                    try:
+                        self.firestore.finalize_occurrence(
+                            rule.uid, rule.id, rule.lastOccurrenceId,
+                            str(resume_record["status"]), {}, {},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        return ProcessResult(rule.id, rule.uid, STATUS_ERROR, f"schedule status repair failed: {exc}")
                 return ProcessResult(
                     rule.id, rule.uid, STATUS_DUPLICATE,
                     "terminal occurrence already recorded", event_id=rule.lastOccurrenceId,
@@ -593,6 +591,14 @@ class AlertEngine:
             )
             return ProcessResult(rule.id, rule.uid, STATUS_NOT_DUE, "durable occurrence cursor is in the future")
 
+        # Preserve a durable backlog range before moving any cursor. No old
+        # occurrence is sent or declared completed, and future schedules remain
+        # runnable. Explicit operator recovery uses its separate audit gate.
+        from .backlog import protect_backlog
+        protected = protect_backlog(self, rule, scheduled_for, now, dry_run, resume_event_id)
+        if protected is not None:
+            return protected
+
         # A selector-backed one-shot calendar alert evaluates daily until its
         # target event date, then disables only after delivery. Advancing its
         # daily cursor on non-matching days is therefore required.
@@ -602,6 +608,13 @@ class AlertEngine:
             and _has_calendar_selector(rule.condition)
         )
         next_scheduled = next_scheduled_occurrence(recurrence, scheduled_for) if should_advance else None
+        recovery = rule.schedulerRecovery or {}
+        previous_cursor = parse_datetime(recovery.get("previousNextScheduledAt"), timezone_name)
+        if (should_advance and recovery.get("status") in {"requested", "processing"}
+                and recovery.get("duplicateRiskAcknowledged") is True
+                and previous_cursor is not None
+                and (next_scheduled is None or as_utc(previous_cursor) > as_utc(next_scheduled))):
+            next_scheduled = previous_cursor
         scheduled_utc = as_utc(scheduled_for)
         next_utc = as_utc(next_scheduled) if next_scheduled is not None else None
         occurrence_bucket = scheduled_for.isoformat()
@@ -875,8 +888,8 @@ class AlertEngine:
                 error = raw.error
                 invalid_tokens.extend(raw.invalid_tokens)
             except Exception as exc:  # noqa: BLE001
-                channel_status = "failed"
-                error = f"worker exception: {type(exc).__name__}: {exc}"
+                channel_status = "unknown"
+                error = f"worker exception after provider boundary: {type(exc).__name__}"
             result_completed = as_utc(now).isoformat()
             error_code = self._delivery_error_code(channel_name, error)
             result = ChannelResult(
@@ -997,7 +1010,7 @@ class AlertEngine:
         message = render_message(rule, variables)
 
         if dry_run:
-            results = [ChannelResult(c, "sent") for c in channels]
+            results = [ChannelResult(c, "pending") for c in channels]
         else:
             outcome = deliver(
                 message=message,
@@ -1025,10 +1038,7 @@ class AlertEngine:
             tickers=self._tickers(rule) or None,
         )
         if not dry_run:
-            try:
-                self.firestore.write_notification_log(uid, log)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("test log write failed rule=%s (%s)", rule.id, exc)
+            self.firestore.write_notification_log(uid, log)
         return log
 
     # --- helpers -------------------------------------------------------------
@@ -1049,8 +1059,7 @@ class AlertEngine:
     def _cleanup_invalid_push_tokens(self, uid: str, rule_id: str, tokens: List[str]) -> None:
         if not tokens:
             return
-        masked = [f"{token[:12]}…" for token in tokens]
-        logger.warning("rule=%s FCM marked invalid tokens count=%d tokens=%s", rule_id, len(tokens), masked)
+        logger.warning("rule=%s FCM marked invalid tokens count=%d", rule_id, len(tokens))
         cleanup = getattr(self.firestore, "remove_invalid_push_tokens", None)
         if not callable(cleanup):
             logger.info("rule=%s invalid tokens recorded; Firestore cleanup is unavailable in this runtime", rule_id)
@@ -1088,7 +1097,7 @@ class AlertEngine:
         for channel in channels:
             if channel == "telegram" and settings.telegramChatId:
                 return True
-            if channel == "push" and settings.pushTokens:
+            if channel == "push" and settings.delivery_tokens():
                 return True
         return False
 

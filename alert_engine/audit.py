@@ -72,7 +72,10 @@ def _rule_rows(uid: Optional[str]) -> Iterable[tuple[str, AlertRule]]:
 def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, Any]]:
     recurrence = rule.trigger.recurrence
     if recurrence is None:
-        return None
+        return {"uid": uid, "ruleId": rule.id, "ruleName": rule.name,
+                "classification": "unscheduled_condition_rule", "enabled": rule.enabled,
+                "lastTriggeredAt": rule.lastTriggeredAt, "lastValue": rule.lastValue,
+                "note": "Historical threshold truth cannot be inferred from today's price or a stale UI date."}
     timezone_name = recurrence.tz or "Asia/Seoul"
     cursor = parse_datetime(rule.nextScheduledAt, timezone_name)
     migration = rule.schedulerMigration if isinstance(rule.schedulerMigration, dict) else None
@@ -85,6 +88,13 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
         "timezone": timezone_name,
         "durableSchedulerVersion": rule.durableSchedulerVersion,
     }
+    if rule.scheduleStatus == "processing" and rule.lastOccurrenceId:
+        snap = get_db().collection("users").document(uid).collection(NOTIFICATION_LOGS).document(rule.lastOccurrenceId).get()
+        record = snap.to_dict() or {}
+        return {**base, "classification": "inflight_occurrence" if snap.exists else "missing_inflight_record",
+                "occurrenceId": rule.lastOccurrenceId, "status": record.get("status"),
+                "scheduledFor": record.get("scheduledFor"),
+                "channelStatuses": [{"channel": row.get("channel"), "status": row.get("status")} for row in record.get("channels", [])]}
 
     if rule.nextScheduledAt is None:
         is_legacy = (
@@ -168,6 +178,10 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
         }
 
     candidate = cursor
+    from .backlog import backlog_plan
+    from .config import load_config
+    plan = backlog_plan(rule, candidate, now, load_config().backlog_max_age_minutes)
+    protection = {"proposedBacklogHold": {key: value.isoformat() if isinstance(value, datetime) else value for key, value in plan.items()}} if plan else {}
 
     event_id = make_event_id(rule.id, candidate.isoformat())
     db = get_db()
@@ -177,6 +191,7 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
         return {
             **base,
             **migration_fields,
+            **protection,
             "occurrenceId": event_id,
             "scheduledFor": as_utc(candidate).isoformat(),
             "classification": "recorded_occurrence",
@@ -189,6 +204,7 @@ def audit_rule(uid: str, rule: AlertRule, now: datetime) -> Optional[Dict[str, A
     return {
         **base,
         **migration_fields,
+        **protection,
         "occurrenceId": event_id,
         "scheduledFor": as_utc(candidate).isoformat(),
         "classification": "overdue_cursor",
@@ -205,7 +221,6 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
     db = get_db()
     requested_at = datetime.now(timezone.utc)
     rule_ref = db.collection("users").document(uid).collection(ALERT_RULES).document(rule_id)
-    transaction = db.transaction()
 
     @firestore.transactional
     def prepare(transaction):
@@ -237,7 +252,15 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
             raise RuntimeError(f"refusing recovery: legacy occurrence log already exists: {occurrence_id}")
         current = parse_datetime(rule.nextScheduledAt, recurrence.tz)
         if current is not None and parsed >= current:
-            raise RuntimeError("refusing recovery: scheduled occurrence is not earlier than current cursor")
+            # A held one-shot keeps its exact cursor. Only its permanent hold
+            # evidence can authorize an explicitly approved equal-cursor replay.
+            held = None
+            if rule.scheduleStatus == "recovery_held" and as_utc(parsed) == as_utc(current):
+                hold_id = f"{rule_id}:backlog:{as_utc(parsed).isoformat()}"
+                hold_snap = log_col.document(hold_id).get(transaction=transaction)
+                held = hold_snap.to_dict() or {} if hold_snap.exists else {}
+            if not held or held.get("status") != "recovery_held" or held.get("triggerSnapshot") != rule.trigger.to_dict():
+                raise RuntimeError("refusing recovery: scheduled occurrence is not earlier than current cursor")
         if rule.scheduleStatus == "processing":
             raise RuntimeError("refusing recovery: rule has an occurrence in processing")
         transaction.set(rule_ref, {
@@ -259,7 +282,8 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
         return parsed, occurrence_id
 
     try:
-        parsed, occurrence_id = prepare(transaction)
+        from .reliability_store import _commit_with_contention
+        parsed, occurrence_id = _commit_with_contention(db, prepare, lambda: None)
     except RuntimeError as exc:
         raise SystemExit(str(exc)) from exc
     return {
@@ -274,13 +298,14 @@ def _prepare_recovery(uid: str, rule_id: str, scheduled_for: str, acknowledged: 
 
 
 def _duplicate_history_rows(uid: Optional[str]) -> list[Dict[str, Any]]:
-    """Detect duplicate eventIds even when legacy documents used random IDs."""
+    """One audit scan: held intervals plus duplicate legacy/random event IDs."""
     db = get_db()
     if uid:
         snaps = db.collection("users").document(uid).collection(NOTIFICATION_LOGS).stream()
     else:
         snaps = db.collection_group(NOTIFICATION_LOGS).stream()
     grouped: Dict[tuple[str, str], list[str]] = {}
+    held = []
     for snap in snaps:
         data = snap.to_dict() or {}
         event_id = data.get("eventId")
@@ -290,8 +315,15 @@ def _duplicate_history_rows(uid: Optional[str]) -> list[Dict[str, Any]]:
         if not row_uid:
             parts = snap.reference.path.split("/")
             row_uid = parts[1] if len(parts) >= 2 and parts[0] == "users" else ""
+        if data.get("status") == "recovery_held":
+            plan = data.get("backlog") or {}
+            held.append({"uid": row_uid, "ruleId": data.get("ruleId"),
+                         "occurrenceId": event_id, "classification": "held_backlog_record",
+                         "fromInclusive": plan.get("fromInclusive"),
+                         "untilExclusive": plan.get("untilExclusive"),
+                         "channelStatuses": [{"channel": row.get("channel"), "status": row.get("status")} for row in data.get("channels", [])]})
         grouped.setdefault((row_uid or "", event_id), []).append(snap.id)
-    return [
+    return held + [
         {
             "uid": row_uid,
             "occurrenceId": event_id,

@@ -28,7 +28,7 @@ from typing import Optional
 
 # Bumped whenever evaluation/delivery semantics change. Stamped onto rules and
 # notification logs so history + backtests are reproducible.
-ENGINE_VERSION = "3.0.0"
+ENGINE_VERSION = "3.1.0"
 
 # Default timezone for recurrence/quiet-hours interpretation (US requirement).
 DEFAULT_TZ = os.environ.get("DEFAULT_TZ", "Asia/Seoul")
@@ -96,6 +96,8 @@ class EngineConfig:
     delivery_backoff_base_seconds: float = DELIVERY_BACKOFF_BASE_SECONDS
     delivery_backoff_max_seconds: float = DELIVERY_BACKOFF_MAX_SECONDS
     eval_window_minutes: int = DEFAULT_EVAL_WINDOW_MINUTES
+    # A full day tolerates ordinary Actions delay while holding outage backlog.
+    backlog_max_age_minutes: int = 1440
 
     @property
     def has_firebase_credentials(self) -> bool:
@@ -114,4 +116,5 @@ def load_config() -> EngineConfig:
         delivery_backoff_base_seconds=DELIVERY_BACKOFF_BASE_SECONDS,
         delivery_backoff_max_seconds=DELIVERY_BACKOFF_MAX_SECONDS,
         eval_window_minutes=DEFAULT_EVAL_WINDOW_MINUTES,
+        backlog_max_age_minutes=max(60, int(os.environ.get("ALERT_BACKLOG_MAX_AGE_MINUTES", "1440"))),
     )

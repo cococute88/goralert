@@ -54,7 +54,7 @@ def test_raising_channel_is_isolated():
 
     assert boom.calls == 1 and ok.calls == 1
     statuses = {r.channel: r.status for r in outcome.results}
-    assert statuses["boom"] == "failed"
+    assert statuses["boom"] == "unknown"
     assert statuses["ok"] == "sent"
 
 
@@ -74,7 +74,7 @@ def test_one_bad_channel_others_called_exactly_once(fail_index, raises):
     for i, name in enumerate(names):
         assert channels[name].calls == 1, f"{name} should be attempted exactly once"
         result = next(r for r in outcome.results if r.channel == name)
-        assert result.status == ("failed" if i == fail_index else "sent")
+        assert result.status == (("unknown" if raises else "failed") if i == fail_index else "sent")
     # One result per requested channel.
     assert len(outcome.results) == len(names)
 

@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 
 const python = process.platform === "win32" ? "python" : "python3";
 const commands = [
-  [python, ["-m", "pytest", "alert_engine/tests/test_firestore_emulator.py", "-q"]],
+  [python, ["-m", "pytest", "alert_engine/tests", "-q"]],
   [process.execPath, ["--test", "tests/firestore-emulator-rules.test.mjs"]],
 ];
 

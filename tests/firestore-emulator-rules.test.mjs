@@ -24,6 +24,18 @@ import {
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 const authHost = process.env.FIREBASE_AUTH_EMULATOR_HOST;
 
+test("anonymous monitor may get only the sanitized heartbeat singleton", { skip: !emulatorHost }, async () => {
+  const app = initializeApp({ projectId: "demo-goralert", apiKey: "demo-api-key" }, `monitor-${Date.now()}`);
+  const db = getFirestore(app);
+  const [host, port] = emulatorHost.split(":");
+  connectFirestoreEmulator(db, host, Number(port));
+  try {
+    await getDoc(doc(db, "systemHealth", "alertEngine"));
+    await assert.rejects(() => getDocs(collection(db, "systemHealth")), (error) => error?.code === "permission-denied");
+    await assert.rejects(() => setDoc(doc(db, "systemHealth", "alertEngine"), { lastSuccessfulRunAt: "forged" }), (error) => error?.code === "permission-denied");
+  } finally { await deleteApp(app); }
+});
+
 test("owner rules protect scheduler state and production history", {
   skip: !emulatorHost || !authHost,
 }, async () => {
@@ -38,6 +50,10 @@ test("owner rules protect scheduler state and production history", {
   connectFirestoreEmulator(db, host, Number(port));
 
   try {
+    // The aggregate heartbeat is get-only, even for an authenticated owner.
+    await assert.rejects(() => setDoc(doc(db, "systemHealth", "alertEngine"), { lastSuccessfulRunAt: "forged" }), (error) => error?.code === "permission-denied");
+    await assert.rejects(() => getDocs(collection(db, "systemHealth")), (error) => error?.code === "permission-denied");
+    await getDoc(doc(db, "systemHealth", "alertEngine"));
     const settingsRef = doc(db, "users", uid, "alertSettings", "default");
     await setDoc(settingsRef, { globalEnabled: false, updatedAt: serverTimestamp() });
     assert.equal((await getDoc(settingsRef)).data().globalEnabled, false);

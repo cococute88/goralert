@@ -4,7 +4,7 @@ The **real** alert engine for GORALERT. It evaluates alert rules, gates them
 (recurrence / quiet-hours / cooldown / idempotency), fans out delivery to
 Telegram + push, and persists exactly one `NotificationLog` per fired event.
 
-It runs as a scheduled **GitHub Actions** job (see
+It runs as an externally dispatched **GitHub Actions** job (see
 `.github/workflows/alert-engine.yml`) and reads/writes **Firestore** as the
 single source of truth. The Next.js web app and this engine interoperate on the
 **same** Firestore documents (camelCase shapes mirror `lib/alerts/types.ts`).
@@ -14,7 +14,7 @@ single source of truth. The Next.js web app and this engine interoperate on the
 ## Architecture
 
 ```
-GitHub Actions cron ──> python -m alert_engine.main --job-scope <scope>
+External clock -> GitHub Actions ──> python -m alert_engine.main --job-scope <scope>
                               │
                               ▼
         ┌─────────────────────────────────────────────┐
@@ -38,8 +38,10 @@ Key design properties:
   all durable state (lastTriggeredAt, lastValue, enabled, logs) lives in
   Firestore. Any run can be dropped/replayed safely.
 - **Durable scheduled occurrences.** Scheduled rules persist
-  `nextScheduledAt`; a due occurrence never expires. The occurrence record and
-  next cursor are committed atomically before delivery.
+  `nextScheduledAt`; ordinary delays retain the original occurrence. Outage backlog
+  older than 24 hours is held in a permanent interval record before advancing
+  to the first occurrence within the allowed window. Nothing is declared sent.
+  See [recovery runbook](../docs/alert-recovery-runbook.md).
 - **No automatic legacy backlog.** A pre-version recurring rule without a
   cursor is transactionally initialized to its first strictly future
   occurrence. The migration records `skip_automatic_backlog` metadata and does
@@ -250,3 +252,15 @@ The engine + tests are complete; only real secrets/data are outstanding:
 
 With those in place the scheduled workflow processes live rules end to end. No
 code changes are required — the engine reads everything from Firestore.
+
+## 2026-11 reliability recovery
+
+Read [the recovery runbook](../docs/alert-recovery-runbook.md) before enabling any
+production workflow. GitHub schedules and the no-op keepalive were replaced by
+an explicitly armed external clock and an independent dead-man monitor. The
+worker code is in `infra/monitor`; it does not enable workflows automatically.
+Test requests now use `settings-test:request:{requestId}`, atomic leases and
+per-channel durable state. `--test-push --dry-run` attempts no writes or sends,
+and failed/partial/unknown/held outcomes produce a nonzero drain exit status.
+A full non-dry-run engine writes one sanitized heartbeat; test/partial runs
+cannot make the main engine look healthy.
