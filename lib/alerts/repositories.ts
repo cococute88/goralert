@@ -62,6 +62,7 @@ import type {
   DeliveryChannel,
   MessageTemplate,
   NotificationLog,
+  NotificationChannelResult,
   PushDevice,
 } from "./types";
 import { DURABLE_SCHEDULER_VERSION, initialSchedulerCursor } from "./schedule";
@@ -70,7 +71,7 @@ const DEFAULT_LOG_WINDOW = 200;
 const TERMINAL_SCHEDULE_STATUSES = new Set([
   "sent", "partial_failure", "failed", "skipped", "cancelled", "disabled", "delivery_unknown",
   "condition_false", "no_data", "stale_data", "provider_error", "evaluation_error",
-  "skipped_quiet_hours", "skipped_cooldown",
+  "skipped_quiet_hours", "skipped_cooldown", "recovery_held",
 ]);
 
 function requireDb() {
@@ -596,18 +597,14 @@ export async function deleteCalendarAlertMark(uid: string, id: string): Promise<
 //
 // The settings "테스트 Push / Telegram" buttons DO NOT deliver in the browser.
 // They enqueue a request document that the Python engine drains through the
-// production delivery path (send_test_alert -> deliver -> PushChannel), so test
+// production delivery path (atomic claim -> deliver -> PushChannel), so test
 // and production share ONE send implementation. The UI then observes the same
 // document for the engine-written outcome (results come from the channel's real
 // return value — never fabricated client-side).
 
-export type TestPushRequestStatus = "pending" | "done" | "failed" | "error";
+export type TestPushRequestStatus = "pending" | "processing" | "done" | "partial" | "unknown" | "recovery_held" | "failed" | "error";
 
-export type TestPushRequestResult = {
-  channel: DeliveryChannel;
-  status: "sent" | "failed";
-  error?: string;
-};
+export type TestPushRequestResult = NotificationChannelResult;
 
 export type TestPushRequest = {
   status: TestPushRequestStatus;
@@ -651,7 +648,7 @@ export function watchPendingTestPushRequests(
   onChange: (items: PendingTestPushRequest[]) => void,
 ): () => void {
   if (!firestoreDb) return () => {};
-  const q = query(testPushRequestsCol(firestoreDb, uid), where("status", "==", "pending"));
+  const q = query(testPushRequestsCol(firestoreDb, uid), where("status", "in", ["pending", "processing"]));
   return onSnapshot(
     q,
     (snap) => {
@@ -671,12 +668,13 @@ export function watchPendingTestPushRequests(
 }
 
 // Observe a test-push request until the engine finalizes it (or timeout).
-// Resolves with the terminal document (status !== "pending") whose `results`
+// Resolves with a server-confirmed terminal document whose `results`
 // reflect the real PushChannel/TelegramChannel outcome, or null on timeout.
 export function waitForTestPushResult(
   uid: string,
   requestId: string,
   timeoutMs = 90_000,
+  onProgress?: (request: TestPushRequest) => void,
 ): Promise<TestPushRequest | null> {
   const db = requireDb();
   return new Promise((resolve) => {
@@ -691,9 +689,13 @@ export function waitForTestPushResult(
     const timer = setTimeout(() => finish(null), timeoutMs);
     const unsubscribe = onSnapshot(
       testPushRequestDoc(db, uid, requestId),
+      { includeMetadataChanges: true },
       (snap) => {
         const data = snap.data() as TestPushRequest | undefined;
-        if (data && data.status && data.status !== "pending") finish(data);
+        if (data && !snap.metadata.hasPendingWrites && !snap.metadata.fromCache) {
+          onProgress?.(data);
+          if (data.status && !["pending", "processing"].includes(data.status)) finish(data);
+        }
       },
       () => finish(null),
     );

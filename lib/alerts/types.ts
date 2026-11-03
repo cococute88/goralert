@@ -251,11 +251,13 @@ export type NotificationStatus =
   | "skipped_cooldown"
   | "cancelled"
   | "disabled"
-  | "delivery_unknown";
+  | "delivery_unknown"
+  | "recovery_held";
 
 // Permanent history record (永久 보존, never deleted — UI windows the view only).
 // ruleName/tickers are denormalized search-key fields for REQ-024/REQ-044 history search.
 export type NotificationLog = {
+  backlog?: { fromInclusive: string; untilExclusive?: string | null; policy?: string };
   id: string;
   eventId: string;
   ruleId: string;
