@@ -10,7 +10,13 @@ def backlog_plan(rule, scheduled_for, now, max_age_minutes=1440):
     recurrence = rule.trigger.recurrence
     # Keep any recent due occurrence, rather than blindly jumping to 'now'.
     boundary = now - timedelta(minutes=max_age_minutes)
-    follows_schedule = rule.trigger.mode == "recurring" or recurrence.kind == "calendar"
+    # Match the engine's once-calendar policy exactly. A daily fixed-time once
+    # rule without an event selector has no independent future occurrence.
+    from .engine import _has_calendar_selector
+    follows_schedule = rule.trigger.mode == "recurring" or (
+        recurrence.kind == "calendar" and rule.condition is not None
+        and _has_calendar_selector(rule.condition)
+    )
     next_cursor = first_future_scheduled_occurrence(recurrence, boundary) if follows_schedule else None
     return {
         "policy": "hold_for_operator_review",

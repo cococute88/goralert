@@ -163,11 +163,11 @@ test("health endpoint read failure cannot display a healthy engine", async () =>
 
 function monitorFixture(options = {}) {
   const calls = [];
-  const env = { GITHUB_ACTIONS_TOKEN: "offline", HEALTHCHECK_PING_URL: "https://offline.test/ping", MIN_SAFE_COMMIT: "safe", RECOVERY_ARMED: "approved-v1", ...options.env };
+  const env = { MONITORING_ACTIVE: "true", GITHUB_ACTIONS_TOKEN: "offline", HEALTHCHECK_PING_URL: "https://offline.test/ping", MIN_SAFE_COMMIT: "a".repeat(40), RECOVERY_ARMED: "approved-v1", ...options.env };
   const fetcher = async (url, init = {}) => {
     calls.push([url, init]);
     if (url.startsWith("https://offline.test")) return new Response(null, { status: 200 });
-    if (url.includes("engine-health")) return Response.json({ state: options.health ?? "healthy" });
+    if (url.includes("engine-health")) return Response.json({ state: options.health ?? "healthy", dispatchReady: true });
     if (url.includes("compare/")) return Response.json({ status: options.compare ?? "identical", files: options.files ?? [] });
     if (url.includes("/runs?")) return Response.json({ workflow_runs: [{ status: "completed", conclusion: options.conclusion ?? "success", updated_at: "2026-11-03T03:00:00Z" }] });
     if (url.endsWith("dispatches")) return new Response(null, { status: options.dispatchStatus ?? 204 });

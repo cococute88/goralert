@@ -9,6 +9,8 @@ export type EngineHealth = {
   evaluationErrors?: number;
   deliveryErrors?: number;
   workflows?: Record<string, string>;
+  dispatchReady?: boolean;
+  preflight?: "ready" | "heartbeat_missing" | "configuration_unavailable" | "target_mismatch" | "github_unavailable" | "workflow_inactive" | "firestore_forbidden" | "firestore_unavailable" | "read_failed";
 };
 
 // 30 min cadence + 45 min scheduling grace; a 3 hour gap is an outage.

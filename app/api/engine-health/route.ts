@@ -33,8 +33,20 @@ export async function GET() {
       }));
     }
     value = classifyEngineHealth(heartbeat, workflows);
+    const target = workflowTarget();
+    // A 404 on this get-only path is a readable but not-yet-created heartbeat.
+    // Authentication/rules failures are a different, non-dispatchable state.
+    const firestoreReadable = responses[0].ok || responses[0].status === 404;
+    const preflight = target.repo !== "cococute88/goralert" || target.workflow !== "alert-test-push.yml" || target.ref !== "main" ? "target_mismatch"
+      : Object.values(workflows).some((state) => state === "unknown") ? "github_unavailable"
+      : Object.values(workflows).some((state) => state !== "active") ? "workflow_inactive"
+      : !firestoreReadable ? ([401, 403].includes(responses[0].status) ? "firestore_forbidden" : "firestore_unavailable")
+      : responses[0].status === 404 ? "heartbeat_missing" : "ready";
+    value = { ...value, dispatchReady: preflight === "ready" || preflight === "heartbeat_missing", preflight };
+    if (!value.dispatchReady && value.state === "healthy") value = { ...value, state: "unknown", message: "엔진 상태 확인 설정과 권한을 확인해야 합니다." };
   } catch {
-    value = { state: "unknown", message: "엔진 상태 조회에 실패했습니다. 정상 여부를 확인할 수 없습니다." };
+    value = { state: "unknown", message: "엔진 상태 조회에 실패했습니다. 정상 여부를 확인할 수 없습니다.", dispatchReady: false,
+      preflight: process.env.GITHUB_DISPATCH_TOKEN && process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ? "read_failed" : "configuration_unavailable" };
   }
   cached = { at: Date.now(), value };
   return NextResponse.json(value, { headers: { "Cache-Control": "no-store" } });

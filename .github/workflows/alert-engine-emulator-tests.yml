@@ -5,12 +5,14 @@ on:
     paths:
       - "alert_engine/**"
       - "lib/alerts/**"
+      - "app/api/engine-health/**"
       - "firestore.rules"
       - "firestore.indexes.json"
       - "firebase.json"
       - "package.json"
       - "package-lock.json"
       - "tests/firestore-emulator-rules.test.mjs"
+      - "tests/engine-health-preflight.test.mjs"
       - "scripts/run-firestore-emulator-tests.mjs"
       - ".github/workflows/alert-engine-emulator-tests.yml"
   workflow_dispatch:

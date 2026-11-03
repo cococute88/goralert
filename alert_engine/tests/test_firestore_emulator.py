@@ -97,13 +97,14 @@ def test_real_outage_hold_is_atomic_preserves_history_and_does_not_block_future(
     assert push.calls == tg.calls == 1
 
 
-def test_real_hold_rejects_schedule_edit_and_preserves_once_cursor():
+@pytest.mark.parametrize("kind", ["monthlyFirstDay", "calendar"])
+def test_real_hold_rejects_schedule_edit_and_preserves_once_cursor(kind):
     from alert_engine.backlog import backlog_plan
     from .test_durable_scheduling import _rule
     old = datetime(2026, 10, 1, 7, tzinfo=KST)
     now = datetime(2026, 11, 3, 12, tzinfo=KST)
     uid, ref = _refs("rule")
-    rule = _rule("monthlyFirstDay", old, "rule")
+    rule = _rule(kind, old, "rule")
     rule.uid = uid
     rule.trigger.mode = "once"
     ref.set(rule.to_dict())

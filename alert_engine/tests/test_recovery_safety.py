@@ -165,6 +165,44 @@ def test_months_of_backlog_hold_preserves_original_cursor_and_future_schedule():
     assert backlog_plan(rule, now + timedelta(hours=2), now) is None
 
 
+@pytest.mark.parametrize("selector", [False, True])
+def test_once_daily_backlog_advances_only_for_selector_backed_calendar(selector):
+    old = datetime(2026, 10, 1, 7, tzinfo=KST)
+    now = datetime(2026, 11, 3, 12, tzinfo=KST)
+    rule = _rule("calendar", old)
+    rule.trigger.mode = "once"
+    if selector:
+        from alert_engine.models import Condition
+        rule.condition = Condition.from_dict({"kind": "date", "selector": {"source": "calendarEvents"}})
+    plan = backlog_plan(rule, old, now)
+    assert (plan["nextCursor"] is not None) is selector
+    assert rule.nextScheduledAt == old.astimezone(timezone.utc)
+
+
+def test_backlog_boundary_is_strictly_older_than_24_hours():
+    old = datetime(2026, 10, 31, 7, tzinfo=KST)
+    rule = _rule("monthlyLastDay", old)
+    assert backlog_plan(rule, old, old + timedelta(hours=24)) is None
+    plan = backlog_plan(rule, old, old + timedelta(hours=24, microseconds=1))
+    assert plan["fromInclusive"] == old.astimezone(timezone.utc).isoformat()
+    assert plan["nextCursor"] == datetime(2026, 11, 30, 7, tzinfo=KST).astimezone(timezone.utc)
+
+
+def test_large_stale_test_queue_is_held_across_multiple_drains_without_sends():
+    class BoundedQueue(QueueFirestore):
+        def list_pending_test_requests(self, uid=None, limit=50):
+            return super().list_pending_test_requests(uid, limit)[:limit]
+    fs = BoundedQueue([{"id": f"old-{n}", "uid": "u1", "status": "pending", "channels": ["push", "telegram"],
+                        "requestedAt": datetime.now(timezone.utc) - timedelta(days=31)} for n in range(120)],
+                      settings=AlertSettings(globalEnabled=True, pushTokens=["offline"], telegramChatId="offline"))
+    push, tg = FakeChannel("push"), FakeChannel("telegram")
+    engine = _engine(fs, push, tg)
+    assert [test_push.process_test_requests(engine=engine, firestore=fs)["held"] for _ in range(3)] == [50, 50, 20]
+    assert push.calls == tg.calls == 0
+    assert len(fs.logs) == 120
+    assert test_push.process_test_requests(engine=engine, firestore=fs)["processed"] == 0
+
+
 def test_explicit_single_recovery_preserves_existing_future_cursor():
     scheduled = datetime(2026, 10, 1, 7, tzinfo=KST)
     future = datetime(2026, 12, 1, 7, tzinfo=KST)
