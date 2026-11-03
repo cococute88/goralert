@@ -1,19 +1,14 @@
-name: Repo Keepalive
+name: Alert Workflow Diagnostics
 
-# Prevents GitHub from auto-deactivating scheduled workflows after 60 days of
-# repository inactivity (mirrors the intent of
-# original/.github/workflows/wake-streamlit.yml). A lightweight no-op touch on a
-# ~6-day cadence keeps the scheduler — and therefore the alert-engine cron in
-# alert-engine.yml — alive. (REQ-029.4)
+# A no-op schedule did not prevent disabled_inactivity. Manual diagnostics only;
+# the independent clock and watchdog live in infra/monitor.
 
 on:
   workflow_dispatch:
-  schedule:
-    # Every 6 days at 04:11 UTC (well under the 60-day deactivation threshold).
-    - cron: "11 4 */6 * *"
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: repo-keepalive
@@ -24,11 +19,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: No-op heartbeat
+      - name: Inspect workflow states without enabling or dispatching
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          echo "Keepalive heartbeat at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          echo "Purpose: keep scheduled workflows active (60-day deactivation guard)."
-          echo "No repository changes are made by this job."
+          gh api "repos/$REPO/actions/workflows" --jq '.workflows[] | {name,path,state}'
+          echo "Diagnostics cannot prevent inactivity or prove delivery."

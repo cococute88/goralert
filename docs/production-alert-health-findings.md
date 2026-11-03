@@ -1,5 +1,18 @@
 # Production alert health findings
 
+## 2026-11-03 장애 후속 조사
+
+GitHub REST로 `alert-engine.yml`, `alert-test-push.yml`, `keepalive.yml`의
+`disabled_inactivity`를 확정했다. 저장소 Actions는 enabled/all이고 main은 `08add098`이다.
+마지막 메인 실행(10/3 23:02:59 KST)은 8규칙/0발송/0오류, 마지막 Drain(10/4 01:46:22)은
+0요청/0발송이다. Keepalive는 10/7 20:01:03 이후 실행이 없으며 no-op으로 activity를 보장하지 못했다.
+정확한 비활성화 시각과 운영 개별 알림 상태는 미검증이다. 이 아래 8월 조사와 구분한다.
+
+이번 수정은 backlog 보류, 큐 lease/고정 ID, read-only dry-run, DB fail-closed,
+정확한 Drain exit code, 실제 상태 기반 UI, 집계 heartbeat 및 외부 clock/dead-man 감시를 준비한다.
+운영 쓰기·발송·활성화는 수행하지 않는다. [상세 보고](./alert-recovery-report.md)와
+[재가동 절차](./alert-recovery-runbook.md)를 참조한다.
+
 조사 기준은 production main `c8aa7030736136013c42c4610a95c4107203a000`과 2026-08-02 자연
 scheduled run이다. 이 조사와 회귀 검증에서는 production Firestore write, Telegram/FCM 호출,
 workflow dispatch, index/rules 배포를 수행하지 않는다.

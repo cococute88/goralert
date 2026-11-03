@@ -1,0 +1,15 @@
+name = "goralert-watchdog"
+main = "worker.mjs"
+compatibility_date = "2026-11-03"
+
+[triggers]
+crons = ["3,8,13,18,23,28,33,38,43,48,53,58 * * * *"]
+
+[vars]
+# Unarmed until user-approved audit, merge, rules and application deployment.
+RECOVERY_ARMED = "false"
+MIN_SAFE_COMMIT = "SET_TO_REVIEWED_RECOVERY_COMMIT"
+
+# Set encrypted secrets: GITHUB_ACTIONS_TOKEN (this repo, Actions read/write),
+# HEALTHCHECK_PING_URL (independent Healthchecks check with email integration).
+# No Telegram/FCM/Firebase secrets belong here.
