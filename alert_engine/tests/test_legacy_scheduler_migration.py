@@ -283,6 +283,7 @@ def test_explicit_recovery_after_migration_processes_only_requested_occurrence()
     rule.schedulerRecovery = {
         "status": "requested",
         "scheduledFor": requested.astimezone(timezone.utc),
+        "occurrenceId": f"{rule.id}:{requested.isoformat()}",
         "duplicateRiskAcknowledged": True,
     }
     rule.scheduleStatus = "recovery_requested"

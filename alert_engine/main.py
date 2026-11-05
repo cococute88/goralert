@@ -80,7 +80,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--test-push", action="store_true",
         help="drain pending users/{uid}/testPushRequests via the production delivery path "
-             "(send_test_alert -> PushChannel) instead of processing rules",
+             "(atomic claim -> common deliver -> PushChannel) instead of processing rules",
     )
     parser.add_argument("--dry-run", action="store_true", help="evaluate + log decisions but do not deliver or write")
     parser.add_argument("--window-minutes", type=int, default=None, help="override evaluation window")
@@ -117,15 +117,19 @@ def run(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Test-push mode: drain the browser-enqueued testPushRequests queue through
-    # the SAME production delivery path (send_test_alert -> deliver -> PushChannel).
+    # the SAME production channel path (atomic claim -> deliver -> PushChannel).
     # This is what the web "테스트 Push/Telegram" buttons trigger, so test and
     # production share one send implementation.
     if args.test_push:
         from . import test_push
-        counts = test_push.process_test_requests(args.uid, dry_run=args.dry_run)
+        try:
+            counts = test_push.process_test_requests(args.uid, dry_run=args.dry_run)
+        except Exception as exc:
+            logger.error("test drain unavailable: %s", type(exc).__name__)
+            return 1
         elapsed = (datetime.now(timezone.utc) - started).total_seconds()
         logger.info("engine done (test-push) :: %s elapsed=%.2fs", counts, elapsed)
-        return 1 if counts.get("error") else 0
+        return 1 if any(counts.get(key) for key in ("error", "failed", "partial", "unknown", "held")) else 0
 
     try:
         rules = firestore_client.list_enabled_rules(args.uid)
@@ -146,6 +150,8 @@ def run(argv: Optional[List[str]] = None) -> int:
     status_counts: Counter = Counter()
     delivered = 0
     errors = 0
+    delivery_errors = 0
+    channel_counts: Counter = Counter()
 
     for uid, uid_rules in by_uid.items():
         try:
@@ -173,6 +179,11 @@ def run(argv: Optional[List[str]] = None) -> int:
                     dry_run=args.dry_run,
                 )
                 status_counts[result.status] += 1
+                if result.log:
+                    for channel in result.log.channels:
+                        channel_counts[f"{channel.channel}_{channel.status}"] += 1
+                if result.status in {STATUS_PARTIAL_FAILURE, STATUS_DELIVERY_FAILED, STATUS_DELIVERY_UNKNOWN}:
+                    delivery_errors += 1
                 if result.status == STATUS_DELIVERED:
                     delivered += 1
                 if result.status in {
@@ -202,6 +213,16 @@ def run(argv: Optional[List[str]] = None) -> int:
     # A durable per-occurrence failure record is written whenever possible, but
     # the runner must still fail visibly so operations can investigate DB,
     # timezone, evaluation, or worker exceptions.
+    # Partial scope / dry-run / test drains must never make the main evaluator
+    # look healthy. A failed heartbeat write is an operational failure too.
+    if not args.dry_run and not args.uid and args.job_scope == "all":
+        from .health import write_engine_health
+        try:
+            write_engine_health(firestore_client, started, status_counts, channel_counts,
+                                errors - delivery_errors, delivery_errors)
+        except Exception as exc:
+            logger.error("heartbeat persistence failed: %s", type(exc).__name__)
+            errors += 1
     return 1 if errors else 0
 
 

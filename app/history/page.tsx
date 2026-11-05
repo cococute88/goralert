@@ -104,6 +104,7 @@ const STATUS_LABEL: Record<string, string> = {
   skipped_quiet_hours: "방해 금지 시간",
   skipped_cooldown: "쿨다운",
   delivery_unknown: "발송 결과 불명",
+  recovery_held: "과거 예약 보류 · 운영자 검토 필요",
   cancelled: "취소",
   disabled: "비활성화",
 };
@@ -125,7 +126,7 @@ function LogRow({ log }: { log: NotificationLog }) {
                 <Badge tone={
                   log.status === "sent"
                     ? "success"
-                    : log.status === "processing"
+                    : ["processing", "recovery_held", "partial_failure", "delivery_unknown"].includes(log.status)
                       ? "warning"
                       : ["condition_false", "skipped_quiet_hours", "skipped_cooldown", "cancelled", "disabled"].includes(log.status)
                         ? "neutral"
@@ -161,6 +162,14 @@ function LogRow({ log }: { log: NotificationLog }) {
           ) : null}
         </div>
 
+        {log.backlog ? <p className="text-xs text-warning">보류 범위: {formatDateTime(log.backlog.fromInclusive, log.timezone)}부터 {log.backlog.untilExclusive ? `${formatDateTime(log.backlog.untilExclusive, log.timezone)} 전까지` : "해당 단일 회차"} · 미래 예약은 유지됩니다</p> : null}
+        {log.channels.some((channel) => channel.error || channel.errorCode) ? <details className="text-xs text-muted-foreground">
+          <summary className="cursor-pointer">채널별 결과 상세</summary>
+          <ul className="mt-1 space-y-1">{log.channels.map((channel) => <li key={channel.channel} className="break-words">
+            {CHANNEL_LABELS[channel.channel] ?? channel.channel}: {channel.status === "sent" ? "공급자 접수 성공" : channel.status === "unknown" ? "결과 불명" : channel.status === "pending" ? "보류 / 대기" : channel.status === "sending" ? "발송 시작 기록" : "실패"}
+            {channel.errorCode ? ` · ${channel.errorCode}` : ""}{channel.error ? ` · ${channel.error}` : ""}
+          </li>)}</ul>
+        </details> : null}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
           <span>예정 {formatDateTime(log.scheduledFor ?? log.firedAt, log.timezone)}</span>
           <span>처리 {formatDateTime(log.processingStartedAt ?? log.evaluatedAt, log.timezone)}</span>
@@ -338,7 +347,7 @@ export default function GoralertHistoryPage() {
         >
           <Loader2 size={14} className="animate-spin shrink-0" />
           <span>
-            테스트 발송 {pendingTests}건이 아직 처리 중입니다 · 완료되면 아래 기록에 표시됩니다
+            테스트 요청 {pendingTests}건의 완료가 확인되지 않았습니다 · 실행 중이라는 의미는 아닙니다
           </span>
         </div>
       ) : null}

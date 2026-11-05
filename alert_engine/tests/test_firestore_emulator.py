@@ -30,6 +30,99 @@ from .conftest import FakeChannel, FakeDataSource, build_engine
 KST = get_tz("Asia/Seoul")
 
 
+def test_real_test_request_concurrency_lease_and_finalization():
+    uid, _ = _refs("test-queue")
+    req = firestore_client.get_db().collection("users").document(uid).collection("testPushRequests").document("request")
+    req.set({"status": "pending", "channels": ["push"]})
+    now = datetime.now(timezone.utc)
+    payload = {"id": "settings-test:request:request", "eventId": "settings-test:request:request",
+               "status": "processing", "channels": [{"channel": "push", "status": "pending"}],
+               "isTest": True, "message": {"title": "test", "body": "offline"}}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda worker: firestore_client.claim_test_request(uid, "request", payload, worker, now), ["one", "two"]))
+    assert sorted(row["claim"] for row in outcomes) == ["claimed", "in_progress"]
+    winner = next(row for row in outcomes if row["claim"] == "claimed")["record"]["leaseOwner"]
+    assert firestore_client.begin_test_channel_attempt(uid, "request", "push", "loser", now) is False
+    assert firestore_client.begin_test_channel_attempt(uid, "request", "push", winner, now) is True
+    assert firestore_client.begin_test_channel_attempt(uid, "request", "push", winner, now) is False
+    event_id = payload["id"]
+    firestore_client.record_channel_result(uid, event_id, {"channel": "push", "status": "sent"}, winner)
+    # Lease expiry transfers ownership; persisted sent evidence survives.
+    reclaimed = firestore_client.claim_test_request(uid, "request", payload, "new", now + timedelta(minutes=11))
+    assert reclaimed["record"]["channels"][0]["status"] == "sent"
+    with pytest.raises(RuntimeError, match="lease lost"):
+        firestore_client.finish_test_request(uid, "request", winner, "done", [{"channel": "push", "status": "sent"}])
+    firestore_client.finish_test_request(uid, "request", "new", "done", [{"channel": "push", "status": "sent"}])
+    assert req.get().to_dict()["status"] == "done"
+    assert firestore_client.claim_test_request(uid, "request", payload, "again", now)["claim"] == "terminal"
+
+
+def test_real_queue_identity_comes_from_path_not_payload():
+    uid, _ = _refs("identity")
+    req = firestore_client.get_db().collection("users").document(uid).collection("testPushRequests").document("actual-request")
+    req.set({"status": "pending", "uid": "forged-user", "id": "forged-request", "channels": ["push"]})
+    rows = firestore_client.list_pending_test_requests(uid)
+    assert rows[0]["uid"] == uid and rows[0]["id"] == "actual-request"
+
+
+def test_real_outage_hold_is_atomic_preserves_history_and_does_not_block_future():
+    from alert_engine.backlog import backlog_plan
+    from .test_durable_scheduling import _rule
+    old = datetime(2026, 10, 1, 7, tzinfo=KST)
+    now = datetime(2026, 11, 3, 12, tzinfo=KST)
+    uid, ref = _refs("rule")
+    rule = _rule("monthlyFirstDay", old, "rule")
+    rule.uid = uid
+    ref.set(rule.to_dict())
+    history = ref.parent.parent.collection("notificationLogs").document("prior-success")
+    history.set({"status": "sent", "channels": [{"channel": "push", "status": "sent"}]})
+    before = history.get().to_dict()
+    plan = backlog_plan(rule, old, now)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: firestore_client.hold_scheduler_backlog(rule, plan, None, now), range(2)))
+    assert sorted(outcomes) == ["already_held", "held"]
+    updated = ref.get().to_dict()
+    assert updated["nextScheduledAt"] == datetime(2026, 12, 1, 7, tzinfo=KST).astimezone(timezone.utc)
+    assert updated.get("lastTriggeredAt") is None
+    assert history.get().to_dict() == before
+    holds = [snap.to_dict() for snap in ref.parent.parent.collection("notificationLogs").stream() if snap.id != "prior-success"]
+    assert len(holds) == 1 and holds[0]["status"] == "recovery_held"
+    assert holds[0]["previousNextScheduledAt"] == old.astimezone(timezone.utc)
+    # A later normal occurrence remains executable; no historical replay.
+    refreshed = AlertRule.from_dict({"id": "rule", "uid": uid, **updated})
+    push, tg = FakeChannel("push"), FakeChannel("telegram")
+    engine = build_engine(FakeDataSource(), firestore_client, {"push": push, "telegram": tg})
+    result = engine.process_rule(refreshed, now=datetime(2026, 12, 1, 7, 5, tzinfo=KST))
+    assert result.status == "delivered"
+    assert push.calls == tg.calls == 1
+
+
+@pytest.mark.parametrize("kind", ["monthlyFirstDay", "calendar"])
+def test_real_hold_rejects_schedule_edit_and_preserves_once_cursor(kind):
+    from alert_engine.backlog import backlog_plan
+    from .test_durable_scheduling import _rule
+    old = datetime(2026, 10, 1, 7, tzinfo=KST)
+    now = datetime(2026, 11, 3, 12, tzinfo=KST)
+    uid, ref = _refs("rule")
+    rule = _rule(kind, old, "rule")
+    rule.uid = uid
+    rule.trigger.mode = "once"
+    ref.set(rule.to_dict())
+    plan = backlog_plan(rule, old, now)
+    assert plan["nextCursor"] is None
+    ref.update({"scheduleChangedAt": now})
+    assert firestore_client.hold_scheduler_backlog(rule, plan, None, now) == "schedule_changed"
+    ref.update({"scheduleChangedAt": None})
+    assert firestore_client.hold_scheduler_backlog(rule, plan, None, now) == "held"
+    assert ref.get().to_dict()["nextScheduledAt"] == old.astimezone(timezone.utc)
+    assert firestore_client.hold_scheduler_backlog(rule, plan, None, now) == "already_held"
+    # Explicit operator approval may recover that exact held once occurrence;
+    # the hold interval is retained and not relabeled as successful delivery.
+    result = audit._prepare_recovery(uid, "rule", old.isoformat(), True)
+    assert result["changed"] is True and result["sent"] is False
+    assert ref.get().to_dict()["schedulerRecovery"]["status"] == "requested"
+
+
 def _refs(rule_id: str):
     uid = f"emulator-{uuid4().hex}"
     db = firestore_client.get_db()

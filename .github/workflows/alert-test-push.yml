@@ -2,16 +2,14 @@ name: Goralert Test Push Drain
 
 # Drains browser-enqueued test-push requests (users/{uid}/testPushRequests)
 # through the SAME production delivery path as scheduled alerts
-# (python -m alert_engine.main --test-push -> send_test_alert -> PushChannel).
+# (atomic request claim -> common deliver -> PushChannel / TelegramChannel).
 #
 # The web "테스트 Push / Telegram" buttons only WRITE a request document; this
 # workflow is what actually delivers it via FCM/Telegram (through the SAME
 # PushChannel as production). PRIMARY trigger: the button fires workflow_dispatch
-# immediately via the thin /api/test-push bridge, so delivery starts within
-# seconds of the click. The short cron is only a FALLBACK for requests whose
-# immediate dispatch failed (e.g. GITHUB_DISPATCH_TOKEN not configured).
-#
-# GitHub Actions cron is UTC and best-effort (may lag a few minutes under load).
+# immediately via /api/test-push. HTTP 204 acknowledges dispatch only.
+# The external Worker provides fallback after approved deployment; queue
+# observation is the sole source of execution and delivery confirmation.
 
 on:
   workflow_dispatch:
@@ -20,17 +18,15 @@ on:
         description: "Restrict drain to a single uid (default: all users)"
         required: false
         default: ""
-  schedule:
-    # Every 5 minutes — the practical minimum for GitHub Actions schedules.
-    - cron: "*/5 * * * *"
+  # The external clock dispatches a five-minute fallback. No GitHub schedule.
 
 permissions:
   contents: read
 
-# Serialize with the main engine so a test send and a scheduled send never race
-# on the same user's delivery/log writes.
+# Test requests use a dedicated lease namespace and can run independently of
+# scheduled occurrences. Serialize drains to avoid unnecessary contention.
 concurrency:
-  group: goralert-alert-engine
+  group: goralert-test-drain
   cancel-in-progress: false
 
 jobs:
@@ -68,6 +64,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Drain test-push requests
+        env:
+          REQUEST_UID: ${{ github.event.inputs.uid }}
         run: |
-          python -m alert_engine.main --test-push \
-            ${{ github.event.inputs.uid && format('--uid {0}', github.event.inputs.uid) || '' }}
+          args=()
+          if [ -n "$REQUEST_UID" ]; then args+=(--uid "$REQUEST_UID"); fi
+          python -m alert_engine.main --test-push "${args[@]}"

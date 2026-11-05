@@ -105,7 +105,7 @@ class PushChannel:
 
     def send(self, message: MessageTemplate, settings: AlertSettings, **kwargs: Any) -> ChannelSendResult:
         tokens: List[str] = settings.delivery_tokens() if settings else []
-        logger.info("[push] send start :: tokens=%d title=%r", len(tokens), message.title)
+        logger.info("[push] send start :: tokens=%d", len(tokens))
         if not tokens:
             logger.warning("[push] no registered devices in alertSettings — nothing to deliver")
             return ChannelSendResult(
@@ -121,8 +121,8 @@ class PushChannel:
             logger.info("[push] firebase-admin ready (shared Firestore credential)")
         except Exception as exc:  # noqa: BLE001
             # TODO(secret): provide FIREBASE_SERVICE_ACCOUNT to enable FCM push.
-            logger.error("[push] FCM not configured: %s", _fcm_detail(exc))
-            return ChannelSendResult(self.name, "failed", error=f"FCM not configured: {exc}")
+            logger.error("[push] FCM initialization failed: %s", type(exc).__name__)
+            return ChannelSendResult(self.name, "failed", error=f"FCM not configured: {type(exc).__name__}")
 
         # Data-only is intentional. The generated service worker renders it via
         # onBackgroundMessage; adding a notification payload would let FCM/the
@@ -142,6 +142,8 @@ class PushChannel:
             batch = messaging.send_each_for_multicast(multicast)
         except Exception as exc:  # noqa: BLE001
             detail = _fcm_detail(exc)
+            for token in tokens:
+                detail = detail.replace(token, "[redacted]")
             logger.error("[push] send_each_for_multicast raised (whole batch failed): %s", detail)
             return ChannelSendResult(
                 self.name, "failed",
@@ -159,16 +161,18 @@ class PushChannel:
 
         invalid: List[str] = []
         errors: List[str] = []
-        for token, resp in zip(tokens, batch.responses):
-            short = f"{token[:12]}…"
+        for index, (token, resp) in enumerate(zip(tokens, batch.responses)):
+            short = f"device#{index + 1}"
             if resp.success:
-                logger.info("[push]   token=%s -> OK message_id=%s", short, resp.message_id)
+                logger.info("[push]   %s -> OK", short)
                 continue
 
             exc: Optional[BaseException] = resp.exception
             code = _fcm_error_code(exc) if exc is not None else "UNKNOWN"
             detail = _fcm_detail(exc) if exc is not None else "unknown error (no exception)"
-            logger.error("[push]   token=%s -> FAILED code=%s detail=%s", short, code, detail)
+            for known_token in tokens:
+                detail = detail.replace(known_token, "[redacted]")
+            logger.error("[push]   %s -> FAILED code=%s detail=%s", short, code, detail)
             errors.append(f"{short}: {detail}")
 
             if _is_confirmed_unregistered(exc):

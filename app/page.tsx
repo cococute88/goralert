@@ -16,6 +16,7 @@ import { formatNextOccurrence, nextRuleOccurrence, occurrenceIsToday } from "@/l
 import { Badge, Button, Card, CardSection, EmptyState } from "@/components/alerts/ui";
 import { LoadingState, NoUserState } from "@/components/alerts/AuthRequired";
 import AlertKindBadge from "@/components/alerts/forms/AlertKindBadge";
+import EngineHealthStatus from "@/components/alerts/EngineHealthStatus";
 
 const LOG_STATUS_LABEL: Record<string, string> = {
   sent: "발송 성공",
@@ -29,6 +30,7 @@ const LOG_STATUS_LABEL: Record<string, string> = {
   skipped_quiet_hours: "방해 금지 시간",
   skipped_cooldown: "쿨다운",
   delivery_unknown: "발송 결과 불명",
+  recovery_held: "과거 예약 보류 · 운영자 검토 필요",
 };
 
 type RuleWithNext = { rule: AlertRule; next: Date | null };
@@ -108,7 +110,7 @@ export default function GoralertHome() {
     };
   }, [user]);
 
-  const { todayRules, upcomingRules } = useMemo(() => {
+  const { todayRules, upcomingRules, overdueRules } = useMemo(() => {
     const now = new Date();
     const enabled = rules.filter((rule) => rule.enabled);
     const withNext: RuleWithNext[] = enabled.map((rule) => ({
@@ -117,16 +119,15 @@ export default function GoralertHome() {
     }));
 
     // "오늘 예정" = 다음 발송 시각이 오늘로 계산되는 (예측 가능한) 룰만.
-    const today = withNext.filter((item) => item.next !== null && (
-      item.next.getTime() <= now.getTime() || occurrenceIsToday(item.rule, item.next, now)
-    ));
+    const overdue = withNext.filter((item) => item.next !== null && item.next.getTime() < now.getTime());
+    const today = withNext.filter((item) => item.next !== null && item.next.getTime() >= now.getTime() && occurrenceIsToday(item.rule, item.next, now));
 
     // "다음 예정"은 고정 반복과 실제 resolve된 캘린더 일정만 포함한다.
     const scheduledUpcoming = withNext
       .filter((item) => item.next && !occurrenceIsToday(item.rule, item.next, now) && item.next.getTime() > now.getTime())
       .sort((a, b) => a.next!.getTime() - b.next!.getTime())
       .slice(0, 5);
-    return { todayRules: today, upcomingRules: scheduledUpcoming };
+    return { todayRules: today, upcomingRules: scheduledUpcoming, overdueRules: overdue };
   }, [calendarEventsByRule, rules]);
 
   if (authLoading) return <LoadingState />;
@@ -139,6 +140,7 @@ export default function GoralertHome() {
     return (
       <div className="space-y-6">
         <h1 className="text-lg font-bold text-foreground">대시보드</h1>
+        <EngineHealthStatus />
         <EmptyState
           icon={<Bell size={28} />}
           title="첫 알림을 만들어볼까요?"
@@ -166,6 +168,12 @@ export default function GoralertHome() {
         </Link>
       </div>
 
+      <EngineHealthStatus />
+      {overdueRules.length > 0 ? <section>
+        <SectionTitle icon={<CalendarClock size={16} />} title="처리 지연 · 발송 여부 확인 필요" count={overdueRules.length} />
+        <p className="mb-2 text-xs text-muted-foreground">예약 시각이 지났습니다. 미발송 여부는 기록에서 확인하며 오래된 회차는 복구 시 보류됩니다.</p>
+        <div className="space-y-2">{overdueRules.map((item) => <RuleRow key={item.rule.id} {...item} />)}</div>
+      </section> : null}
       <section>
         <SectionTitle icon={<CalendarClock size={16} />} title="오늘 예정 알림" count={todayRules.length} />
         {todayRules.length === 0 ? (

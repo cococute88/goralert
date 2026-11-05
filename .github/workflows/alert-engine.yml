@@ -4,7 +4,7 @@ name: Goralert Alert Engine
 # (checkout -> setup-python 3.11 -> pip install -r requirements.txt -> run script),
 # but instead of committing data it reads/writes Firestore via the alert engine.
 #
-# GitHub Actions cron is UTC. KST = UTC + 9h.
+# External clock is UTC. KST = UTC + 9h. See docs/alert-recovery-runbook.md.
 
 on:
   workflow_dispatch:
@@ -20,9 +20,8 @@ on:
         required: false
         default: false
         type: boolean
-  schedule:
-    # market threshold checks — every 30 min during/around US+KR market hours.
-    - cron: "*/30 * * * *"
+  # External clock dispatches every 30 minutes (:03/:33 UTC). No GitHub
+  # schedule remains subject to the public-repo inactivity policy.
 
 permissions:
   contents: read
@@ -44,6 +43,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
       DEFAULT_TZ: "Asia/Seoul"
+      ALERT_BACKLOG_MAX_AGE_MINUTES: "1440"
     steps:
       - name: Validate Firebase service account secret
         run: |

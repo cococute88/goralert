@@ -1,4 +1,7 @@
 node_modules/
+.venv/
+verification/
+private-audit*.json
 .next/
 .env
 .env.local

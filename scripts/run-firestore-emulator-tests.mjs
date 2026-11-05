@@ -2,8 +2,8 @@ import { spawnSync } from "node:child_process";
 
 const python = process.platform === "win32" ? "python" : "python3";
 const commands = [
-  [python, ["-m", "pytest", "alert_engine/tests/test_firestore_emulator.py", "-q"]],
-  [process.execPath, ["--test", "tests/firestore-emulator-rules.test.mjs"]],
+  [python, ["-m", "pytest", "alert_engine/tests", "-q"]],
+  [process.execPath, ["--test", "tests/firestore-emulator-rules.test.mjs", "tests/engine-health-preflight.test.mjs"]],
 ];
 
 for (const [command, args] of commands) {

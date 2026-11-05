@@ -1,0 +1,18 @@
+name = "goralert-watchdog"
+main = "worker.mjs"
+compatibility_date = "2026-11-03"
+
+[triggers]
+crons = ["3,8,13,18,23,28,33,38,43,48,53,58 * * * *"]
+
+[vars]
+# Both false during setup: no external calls, jobs or Healthchecks pings.
+# Activate monitoring only at approved cutover; disarming the clock while
+# monitoring stays true is a real failure, reported via /fail.
+RECOVERY_ARMED = "false"
+MONITORING_ACTIVE = "false"
+MIN_SAFE_COMMIT = "SET_TO_REVIEWED_RECOVERY_COMMIT"
+
+# Set encrypted secrets: GITHUB_ACTIONS_TOKEN (this repo, Actions read/write),
+# HEALTHCHECK_PING_URL (independent Healthchecks check with email integration).
+# No Telegram/FCM/Firebase secrets belong here.

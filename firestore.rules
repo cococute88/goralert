@@ -6,6 +6,14 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == userId;
     }
 
+    // Sanitized aggregate heartbeat only: no UIDs, messages or credentials.
+    // Clients and external health monitors may get this singleton, never list
+    // the collection or write health evidence. Admin SDK owns all writes.
+    match /systemHealth/alertEngine {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
     function validAlertSettings(data) {
       return data.keys().hasOnly([
           'globalEnabled',

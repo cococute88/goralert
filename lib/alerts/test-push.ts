@@ -2,12 +2,19 @@
 //
 // This calls the thin server bridge (app/api/test-push) which fires a GitHub
 // Actions workflow_dispatch so the Python Alert Engine drains the caller's
-// testPushRequests right away (instead of waiting for the 5-min cron). It does
+// testPushRequests right away (instead of waiting for the approved external fallback). It does
 // NOT deliver anything itself — delivery is done by the engine's PushChannel.
 
 import type { User } from "firebase/auth";
+import type { DeliveryChannel, NotificationChannelResult } from "./types";
 
-export type DispatchResult = { ok: boolean; error?: string };
+export function confirmedTestDelivery(channels: DeliveryChannel[], results: NotificationChannelResult[]): boolean {
+  return channels.length > 0 && results.length > 0
+    && channels.every((channel) => results.some((row) => row.channel === channel && row.status === "sent"))
+    && results.every((row) => row.status === "sent" && channels.includes(row.channel));
+}
+
+export type DispatchResult = { ok: boolean; error?: string; detail?: string; code?: string; fallbackAvailable?: boolean };
 
 // Trigger an immediate engine run for this user. The request document must
 // already be enqueued (repositories.enqueueTestPushRequest) before calling this.
@@ -24,7 +31,7 @@ export async function dispatchTestPushWorkflow(user: User): Promise<DispatchResu
     });
     const data = (await res.json().catch(() => ({}))) as DispatchResult;
     if (!res.ok || !data.ok) {
-      return { ok: false, error: data.error ?? `트리거 실패 (HTTP ${res.status})` };
+      return { ...data, ok: false, error: data.error ?? `트리거 실패 (HTTP ${res.status})` };
     }
     return { ok: true };
   } catch (err) {

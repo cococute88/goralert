@@ -16,13 +16,11 @@
 //   NEXT_PUBLIC_FIREBASE_API_KEY  used only to verify the ID token belongs here
 
 import { NextResponse } from "next/server";
+import { dispatchFailure, githubHeaders, workflowTarget } from "@/lib/alerts/github-dispatch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const DEFAULT_REPO = "cococute88/goralert";
-const DEFAULT_WORKFLOW = "alert-test-push.yml";
-const DEFAULT_REF = "main";
 
 // Verify a Firebase ID token via Google's Identity Toolkit (no admin SDK / no new
 // dependency). Returns the uid when the token is valid & unexpired for THIS
@@ -37,6 +35,7 @@ async function verifyFirebaseToken(idToken: string): Promise<string | null> {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idToken }),
+        signal: AbortSignal.timeout(8000),
       },
     );
     if (!res.ok) return null;
@@ -66,39 +65,38 @@ export async function POST(request: Request): Promise<Response> {
       { status: 500 },
     );
   }
-  const repo = process.env.GITHUB_REPO || DEFAULT_REPO;
-  const workflow = process.env.GITHUB_WORKFLOW_FILE || DEFAULT_WORKFLOW;
-  const ref = process.env.GITHUB_WORKFLOW_REF || DEFAULT_REF;
+  const { repo, workflow, ref } = workflowTarget();
+  const headers = githubHeaders(token);
 
   // Fire workflow_dispatch. GitHub returns 204 on success; the run then drains
   // ONLY this uid's testPushRequests (workflow passes --uid).
   try {
+    const stateResponse = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${encodeURIComponent(workflow)}`, {
+      headers, cache: "no-store", signal: AbortSignal.timeout(8000),
+    });
+    if (!stateResponse.ok) return NextResponse.json({ ok: false, ...dispatchFailure(stateResponse.status), detail: `Workflow status HTTP ${stateResponse.status}`, fallbackAvailable: false }, { status: 502 });
+    const state = String((await stateResponse.json()).state);
+    if (state !== "active") return NextResponse.json({ ok: false, ...dispatchFailure(422, state), detail: `Workflow state: ${state}`, fallbackAvailable: false }, { status: 409 });
     const res = await fetch(
       `https://api.github.com/repos/${repo}/actions/workflows/${workflow}/dispatches`,
       {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28",
-          "User-Agent": "goralert-test-push",
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify({ ref, inputs: { uid } }),
+        signal: AbortSignal.timeout(8000),
       },
     );
     if (res.status === 204) {
-      return NextResponse.json({ ok: true }, { status: 202 });
+      return NextResponse.json({ ok: true, accepted: true, fallbackAvailable: false }, { status: 202 });
     }
     // Surface the real GitHub failure to the user (req 6).
-    const detail = await res.text().catch(() => "");
     return NextResponse.json(
-      { ok: false, error: `GitHub Actions 트리거 실패 (HTTP ${res.status}) ${detail}`.trim() },
+      { ok: false, ...dispatchFailure(res.status), detail: `Dispatch HTTP ${res.status}`, fallbackAvailable: false },
       { status: 502 },
     );
-  } catch (err) {
+  } catch {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : "워크플로우 트리거 중 오류가 발생했습니다." },
+      { ok: false, error: "워크플로 시작 상태를 확인할 수 없습니다. 기록에서 요청 상태를 확인해 주세요.", fallbackAvailable: false },
       { status: 502 },
     );
   }

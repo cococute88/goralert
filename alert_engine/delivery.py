@@ -99,7 +99,7 @@ def _deliver_one(
         try:
             last = channel.send(message, settings)
         except Exception as exc:  # noqa: BLE001 - isolation: never propagate
-            last = ChannelSendResult(getattr(channel, "name", "?"), "failed", error=f"exception: {exc}")
+            last = ChannelSendResult(getattr(channel, "name", "?"), "unknown", error=f"provider exception: {type(exc).__name__}")
 
         if last.ok:
             return last
